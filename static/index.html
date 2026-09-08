@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>System Blackbox — OS Telemetry & DBMS Monitor</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@500;700;800&family=Outfit:wght@400;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div class="container">
+    <div class="header">
+      <div class="title-group">
+        <span class="pulse" id="livePulse"></span>
+        <div>
+          <h1>System Blackbox</h1>
+          <div class="subtitle">OS Telemetry & Forensic Kernel Auditor</div>
+        </div>
+      </div>
+      <div class="header-meta">
+        <div class="status-badge" id="engineBadge">
+          <span class="badge-dot" id="badgeDot"></span>
+          <span id="engineStatus">Connecting to DB...</span>
+        </div>
+        <span class="timestamp" id="lastUpdated">--:--:--</span>
+      </div>
+    </div>
+
+    <!-- 4 Main Vitals Grid -->
+    <div class="grid">
+      <!-- 1. CPU Usage -->
+      <div class="card">
+        <div class="card-header">
+          <span class="label">CPU Usage (/proc/stat)</span>
+          <span class="icon">⚡</span>
+        </div>
+        <div class="value" id="cpuVal">--%</div>
+        <div class="bar-track">
+          <div class="bar-fill bar-cpu" id="cpuBar" style="width: 0%"></div>
+        </div>
+      </div>
+
+      <!-- 2. RAM Usage -->
+      <div class="card">
+        <div class="card-header">
+          <span class="label">RAM Usage (/proc/meminfo)</span>
+          <span class="icon">🧠</span>
+        </div>
+        <div class="value" id="ramVal">--%</div>
+        <div class="bar-track">
+          <div class="bar-fill bar-ram" id="ramBar" style="width: 0%"></div>
+        </div>
+      </div>
+
+      <!-- 3. CPU Temperature -->
+      <div class="card">
+        <div class="card-header">
+          <span class="label">CPU Temp (sysfs/hwmon)</span>
+          <span class="icon">🔥</span>
+        </div>
+        <div class="value" id="tempVal">-- °C</div>
+        <div class="bar-track">
+          <div class="bar-fill bar-temp" id="tempBar" style="width: 0%"></div>
+        </div>
+      </div>
+
+      <!-- 4. Fan Speed -->
+      <div class="card">
+        <div class="card-header">
+          <span class="label">Fan Speed (hwmon RPM)</span>
+          <span class="icon">🌀</span>
+        </div>
+        <div class="value" id="fanVal">-- RPM</div>
+        <div class="bar-track">
+          <div class="bar-fill bar-fan" id="fanBar" style="width: 0%"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Forensic Inotify Audit Log Card -->
+    <div class="card log-card">
+      <div class="card-header">
+        <span class="label">Kernel inotify Deletion Audits (deleted_files table)</span>
+        <span class="badge-mini" id="deletionCount">0 events</span>
+      </div>
+      <div class="table-container">
+        <table class="audit-table">
+          <thead>
+            <tr>
+              <th>ID</th>
+              <th>Timestamp</th>
+              <th>Deleted Target</th>
+            </tr>
+          </thead>
+          <tbody id="deletionsTableBody">
+            <tr>
+              <td colspan="3" class="empty-hint">Watching ./test_watch/ for file deletion events...</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

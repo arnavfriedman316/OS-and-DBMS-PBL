@@ -1,0 +1,16 @@
+# Compiled binaries & objects
+*.o
+system_blackbox
+
+# SQLite runtime databases
+*.db
+*.db-wal
+*.db-shm
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Watched folder
+test_watch/*
+!test_watch/.gitkeep
