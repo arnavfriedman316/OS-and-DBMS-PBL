@@ -1,5 +1,5 @@
 # ============================================================================
-# System Blackbox — Phase 1 Build System
+# System Blackbox — Build System
 # ============================================================================
 # University PBL: Operating Systems + Database Management Systems
 #
@@ -8,17 +8,23 @@
 #   -Wall -Wextra : Enable comprehensive compiler warnings.
 #   -g            : Embed debug symbols (for gdb / valgrind during dev).
 #   -O2           : Optimise for speed without aggressive transformations.
-#   -lsqlite3     : Link against the SQLite3 shared library.
+#   -MMD -MP      : Auto-generate header dependency files (*.d).
+#   -lmariadb     : Link against MySQL / MariaDB C client library.
+#   -lsqlite3     : Link against the SQLite3 shared library (fallback engine).
 #   -pthread      : Enable POSIX threading (required by <thread> and <mutex>).
 # ============================================================================
 
-CXX      := g++
-CXXFLAGS := -std=c++23 -Wall -Wextra -Wpedantic -O2 -g
-LDFLAGS  := -lsqlite3 -pthread
+CXX          := g++
+MYSQL_CFLAGS := $(shell mysql_config --cflags 2>/dev/null || mariadb_config --cflags 2>/dev/null || echo "-I/usr/include/mysql")
+MYSQL_LIBS   := $(shell mysql_config --libs 2>/dev/null || mariadb_config --libs 2>/dev/null || echo "-lmariadb")
 
-TARGET   := system_blackbox
-SRCS     := main.cpp db.cpp sensors.cpp
-OBJS     := $(SRCS:.cpp=.o)
+CXXFLAGS     := -std=c++23 -Wall -Wextra -Wpedantic -O2 -g -MMD -MP $(MYSQL_CFLAGS)
+LDFLAGS      := $(MYSQL_LIBS) -lsqlite3 -pthread
+
+TARGET       := system_blackbox
+SRCS         := main.cpp db.cpp sensors.cpp
+OBJS         := $(SRCS:.cpp=.o)
+DEPS         := $(SRCS:.cpp=.d)
 
 # ── Default target ──────────────────────────────────────────────────────────
 all: $(TARGET)
@@ -31,19 +37,14 @@ $(TARGET): $(OBJS)
 %.o: %.cpp
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 
-# ── Dependency hints (header changes trigger recompilation) ──────────────────
-main.o:    db.hpp sensors.hpp
-db.o:      db.hpp
-sensors.o: sensors.hpp
+# Pull in the auto-generated header dependencies (ignored if they don't exist yet)
+-include $(DEPS)
 
 # ── Utility targets ─────────────────────────────────────────────────────────
-clean:
-	rm -f $(OBJS) $(TARGET) blackbox.db blackbox.db-wal blackbox.db-shm
 
-# Create the test directory that the inotify thread will watch later
-setup:
-	mkdir -p test_watch
-	@echo "[setup] test_watch/ directory ready."
+# Build and start the recording daemon
+run: $(TARGET)
+	./$(TARGET)
 
 # Launch the live Web UI dashboard
 ui:
@@ -51,5 +52,31 @@ ui:
 
 serve: ui
 
-.PHONY: all clean setup ui serve
+# One-time database setup (requires sudo access to MySQL/MariaDB)
+setup-db:
+	@echo "[setup-db] Running sql/setup.sql into MySQL/MariaDB..."
+	@if command -v mariadb >/dev/null 2>&1; then \
+		sudo mariadb < sql/setup.sql; \
+	elif command -v mysql >/dev/null 2>&1; then \
+		sudo mysql < sql/setup.sql; \
+	else \
+		echo "[setup-db ERROR] Neither mariadb nor mysql CLI found."; exit 1; \
+	fi
 
+# Remove build output only — your recorded data in DB is kept
+clean:
+	rm -f $(OBJS) $(DEPS) $(TARGET)
+
+# Delete SQLite fallback files if testing clean starts
+cleandb:
+	@read -p "Delete blackbox.db and all recorded data? [y/N] " ans; \
+	if [ "$$ans" = "y" ] || [ "$$ans" = "Y" ]; then \
+		rm -f blackbox.db blackbox.db-wal blackbox.db-shm; echo "[cleandb] SQLite database deleted."; \
+	else echo "[cleandb] cancelled."; fi
+
+# Create the test directory that the inotify thread watches
+setup:
+	mkdir -p test_watch
+	@echo "[setup] test_watch/ directory ready."
+
+.PHONY: all run ui serve clean cleandb setup setup-db

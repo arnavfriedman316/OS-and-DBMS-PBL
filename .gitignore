@@ -1,5 +1,6 @@
 # Compiled binaries & objects
 *.o
+*.d
 system_blackbox
 
 # SQLite runtime databases

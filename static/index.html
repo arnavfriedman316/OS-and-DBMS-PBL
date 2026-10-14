@@ -1,109 +1,181 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
+  <!-- Character encoding and responsive viewport settings for mobile and desktop -->
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>System Blackbox — OS Telemetry & DBMS Monitor</title>
+
+  <!-- Google Fonts: JetBrains Mono (for numbers/logs) and Outfit (for UI text) -->
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@500;700;800&family=Outfit:wght@400;600;700&display=swap" rel="stylesheet">
+
+  <!-- Link to external stylesheet for layout and colors -->
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
+  <!-- Main centered wrapper for the whole dashboard -->
   <div class="container">
+    
+    <!-- Header: shows title, subtitle, live status indicator, and last updated time -->
     <div class="header">
       <div class="title-group">
+        <!-- Pulsing green dot showing the system is actively running -->
         <span class="pulse" id="livePulse"></span>
         <div>
           <h1>System Blackbox</h1>
-          <div class="subtitle">OS Telemetry & Forensic Kernel Auditor</div>
+          <div class="subtitle">OS Telemetry & Forensic Kernel Auditor (MySQL & SQLite)</div>
         </div>
       </div>
+      
+      <!-- Metadata in the header: daemon status badge, session info, and timestamp -->
       <div class="header-meta">
+        <!-- Status badge turns green when C++ engine is active, red when offline -->
         <div class="status-badge" id="engineBadge">
           <span class="badge-dot" id="badgeDot"></span>
           <span id="engineStatus">Connecting to DB...</span>
         </div>
+        <!-- Shows the timestamp of the latest reading from SQLite -->
         <span class="timestamp" id="lastUpdated">--:--:--</span>
       </div>
     </div>
 
-    <!-- 4 Main Vitals Grid -->
+    <!-- 2x2 Grid displaying the 4 core hardware vitals with Sparkline mini-charts -->
     <div class="grid">
-      <!-- 1. CPU Usage -->
+      
+      <!-- Card 1: CPU Usage (read from /proc/stat) -->
       <div class="card">
         <div class="card-header">
           <span class="label">CPU Usage (/proc/stat)</span>
-          <span class="icon">⚡</span>
         </div>
         <div class="value" id="cpuVal">--%</div>
         <div class="bar-track">
           <div class="bar-fill bar-cpu" id="cpuBar" style="width: 0%"></div>
         </div>
+        <canvas class="sparkline" id="cpuSpark" width="320" height="36"></canvas>
       </div>
 
-      <!-- 2. RAM Usage -->
+      <!-- Card 2: RAM Usage (read from /proc/meminfo) -->
       <div class="card">
         <div class="card-header">
           <span class="label">RAM Usage (/proc/meminfo)</span>
-          <span class="icon">🧠</span>
         </div>
         <div class="value" id="ramVal">--%</div>
         <div class="bar-track">
           <div class="bar-fill bar-ram" id="ramBar" style="width: 0%"></div>
         </div>
+        <canvas class="sparkline" id="ramSpark" width="320" height="36"></canvas>
       </div>
 
-      <!-- 3. CPU Temperature -->
+      <!-- Card 3: CPU Temperature (read from /sys/class/hwmon coretemp) -->
       <div class="card">
         <div class="card-header">
-          <span class="label">CPU Temp (sysfs/hwmon)</span>
-          <span class="icon">🔥</span>
+          <span class="label">CPU Temp (coretemp)</span>
         </div>
         <div class="value" id="tempVal">-- °C</div>
         <div class="bar-track">
           <div class="bar-fill bar-temp" id="tempBar" style="width: 0%"></div>
         </div>
+        <canvas class="sparkline" id="tempSpark" width="320" height="36"></canvas>
       </div>
 
-      <!-- 4. Fan Speed -->
+      <!-- Card 4: Fan Speed (read from /sys/class/hwmon RPM sensors) -->
       <div class="card">
         <div class="card-header">
           <span class="label">Fan Speed (hwmon RPM)</span>
-          <span class="icon">🌀</span>
         </div>
         <div class="value" id="fanVal">-- RPM</div>
         <div class="bar-track">
           <div class="bar-fill bar-fan" id="fanBar" style="width: 0%"></div>
         </div>
+        <canvas class="sparkline" id="fanSpark" width="320" height="36"></canvas>
       </div>
+
     </div>
 
-    <!-- Forensic Inotify Audit Log Card -->
+    <!-- Forensic Logs & Diagnostics Card -->
     <div class="card log-card">
       <div class="card-header">
-        <span class="label">Kernel inotify Deletion Audits (deleted_files table)</span>
-        <span class="badge-mini" id="deletionCount">0 events</span>
+        <div class="tab-buttons">
+          <button class="tab-btn active" id="tabFilesBtn" onclick="switchTab('files')">
+            Inotify Audits <span class="badge-mini" id="deletionCount">0</span>
+          </button>
+          <button class="tab-btn" id="tabAlertsBtn" onclick="switchTab('alerts')">
+            Alerts <span class="badge-mini" id="alertCount">0</span>
+          </button>
+          <button class="tab-btn" id="tabSessionsBtn" onclick="switchTab('sessions')">
+            Crash & Session History <span class="badge-mini" id="sessionCount">0</span>
+          </button>
+        </div>
       </div>
-      <div class="table-container">
+      
+      <!-- Panel 1: File Events Table -->
+      <div class="table-container tab-content" id="panelFiles">
         <table class="audit-table">
           <thead>
             <tr>
-              <th>ID</th>
-              <th>Timestamp</th>
-              <th>Deleted Target</th>
+              <th style="width: 50px;">ID</th>
+              <th style="width: 170px;">Timestamp</th>
+              <th style="width: 110px;">Event</th>
+              <th>Target Path / Rename</th>
             </tr>
           </thead>
           <tbody id="deletionsTableBody">
             <tr>
-              <td colspan="3" class="empty-hint">Watching ./test_watch/ for file deletion events...</td>
+              <td colspan="4" class="empty-hint">Watching ./test_watch/ for file deletion & move events...</td>
             </tr>
           </tbody>
         </table>
       </div>
+
+      <!-- Panel 2: Alerts Table -->
+      <div class="table-container tab-content" id="panelAlerts" style="display: none;">
+        <table class="audit-table">
+          <thead>
+            <tr>
+              <th style="width: 50px;">ID</th>
+              <th style="width: 170px;">Timestamp</th>
+              <th>Metric</th>
+              <th>Value</th>
+              <th>Threshold</th>
+              <th>Status</th>
+            </tr>
+          </thead>
+          <tbody id="alertsTableBody">
+            <tr>
+              <td colspan="6" class="empty-hint">All systems nominal. No threshold breaches recorded.</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <!-- Panel 3: Sessions & Crash Detection Table -->
+      <div class="table-container tab-content" id="panelSessions" style="display: none;">
+        <table class="audit-table">
+          <thead>
+            <tr>
+              <th style="width: 60px;">Session</th>
+              <th>Start Time</th>
+              <th>End Time</th>
+              <th>PID</th>
+              <th>Host</th>
+              <th>Termination Status</th>
+            </tr>
+          </thead>
+          <tbody id="sessionsTableBody">
+            <tr>
+              <td colspan="6" class="empty-hint">No session history found.</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
     </div>
+
   </div>
 
+  <!-- Client-side script to poll the API and update numbers, sparklines, and tables -->
   <script src="app.js"></script>
 </body>
 </html>
