@@ -63,7 +63,8 @@ A Project-Based Learning (PBL) system integrating low-level **Operating Systems*
 ## Repository Structure
 
 ```
-.
+├── DATABASE.md         # Dedicated DBMS guide, table schemas, permissions & queries
+├── DOCUMENTATION.md    # Complete PBL submission documentation & viva guide
 ├── blackbox.conf       # Database credentials, ports, intervals, and thresholds
 ├── Makefile            # Build orchestration (auto-deps, MySQL & SQLite flags, setup-db)
 ├── alerts.hpp          # Threshold alert monitor with sustain & hysteresis
