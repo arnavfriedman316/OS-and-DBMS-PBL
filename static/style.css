@@ -1,14 +1,14 @@
-/* Reset margins, paddings, and set border-box so padding doesn't affect total element width */
+/* reset default margins and box sizing */
 * {
   box-sizing: border-box;
   margin: 0;
   padding: 0;
 }
 
-/* Base page styling: dark background, modern font, and vertically/horizontally centered */
+/* dark slate background and center page content */
 body {
-  background-color: #0b0f19;   /* dark navy/slate background */
-  color: #f1f5f9;              /* light text color */
+  background-color: #0b0f19;
+  color: #f1f5f9;
   font-family: 'Outfit', sans-serif;
   min-height: 100vh;
   display: flex;
@@ -17,16 +17,16 @@ body {
   padding: 24px;
 }
 
-/* Main container limiting dashboard width and stacking cards vertically */
+/* center column layout */
 .container {
   width: 100%;
-  max-width: 860px;            /* maximum dashboard width */
+  max-width: 860px;
   display: flex;
   flex-direction: column;
-  gap: 20px;                   /* spacing between header, grid, and table card */
+  gap: 20px;
 }
 
-/* Header layout: title on the left, status and timestamp on the right */
+/* top header bar */
 .header {
   display: flex;
   align-items: center;
@@ -36,31 +36,31 @@ body {
   gap: 12px;
 }
 
-/* Groups the live pulse dot and the text title together */
+/* pulse icon and text titles */
 .title-group {
   display: flex;
   align-items: center;
   gap: 12px;
 }
 
-/* Pulsing green glowing dot to indicate live daemon activity */
+/* pulsing green glow dot */
 .pulse {
   width: 12px;
   height: 12px;
-  background-color: #34d399;   /* emerald green */
-  border-radius: 50%;          /* make it circular */
+  background-color: #34d399;
+  border-radius: 50%;
   box-shadow: 0 0 10px #34d399;
   animation: pulse 1.6s infinite;
 }
 
-/* Animation keyframes for the pulsing glowing dot */
+/* pulse animation keyframes */
 @keyframes pulse {
   0% { transform: scale(0.95); opacity: 0.7; }
   50% { transform: scale(1.25); opacity: 1; box-shadow: 0 0 14px #34d399; }
   100% { transform: scale(0.95); opacity: 0.7; }
 }
 
-/* Main dashboard title text */
+/* title typography */
 h1 {
   font-size: 1.4rem;
   font-weight: 700;
@@ -68,91 +68,91 @@ h1 {
   color: #f8fafc;
 }
 
-/* Subtitle under the main title */
+/* muted subtitle */
 .subtitle {
   font-size: 0.8rem;
-  color: #64748b;              /* muted gray */
+  color: #64748b;
   font-weight: 500;
 }
 
-/* Container for the status pill badge and timestamp */
+/* status pill and clock */
 .header-meta {
   display: flex;
   align-items: center;
   gap: 14px;
 }
 
-/* Pill badge showing whether the C++ daemon is currently active */
+/* engine status indicator pill */
 .status-badge {
   display: flex;
   align-items: center;
   gap: 7px;
   padding: 5px 12px;
-  border-radius: 3px;          /* sharp modern badge */
-  background: rgba(52, 211, 153, 0.12); /* transparent green */
+  border-radius: 3px;
+  background: rgba(52, 211, 153, 0.12);
   border: 1px solid rgba(52, 211, 153, 0.25);
   font-size: 0.78rem;
   font-weight: 600;
-  color: #34d399;              /* green text */
+  color: #34d399;
   transition: all 0.3s ease;
 }
 
-/* Red styling for the status badge when the C++ engine or server is offline */
+/* offline badge theme */
 .status-badge.offline {
-  background: rgba(239, 68, 68, 0.12);   /* transparent red */
+  background: rgba(239, 68, 68, 0.12);
   border-color: rgba(239, 68, 68, 0.25);
-  color: #f87171;                        /* red text */
+  color: #f87171;
 }
 
-/* Small dot inside the status badge */
+/* colored dot inside status badge */
 .badge-dot {
   width: 7px;
   height: 7px;
   border-radius: 50%;
-  background-color: currentColor; /* inherits badge text color */
+  background-color: currentColor;
 }
 
-/* Monospace timestamp display */
+/* monospace clock display */
 .timestamp {
   font-family: 'JetBrains Mono', monospace;
   font-size: 0.85rem;
   color: #94a3b8;
 }
 
-/* 2-column grid layout for the 4 vitals cards */
+/* two-column vitals cards layout */
 .grid {
   display: grid;
-  grid-template-columns: repeat(2, 1fr); /* two equal columns */
+  grid-template-columns: repeat(2, 1fr);
   gap: 16px;
 }
 
-/* Responsive adjustment: collapse to 1 single column on mobile screens */
+/* stack cards into single column on mobile */
 @media (max-width: 580px) {
   .grid {
     grid-template-columns: 1fr;
   }
 }
 
-/* Shared card component styling */
+/* base card styling */
 .card {
-  background: #131b2e;         /* dark card background */
-  border: 1px solid rgba(255, 255, 255, 0.08); /* subtle border */
-  border-radius: 2px;          /* sharp engineering corners */
+  background: #131b2e;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 2px;
   padding: 20px 22px;
   display: flex;
   flex-direction: column;
   gap: 12px;
-  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.35); /* card shadow */
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.35);
 }
 
-/* Header inside each card: label on left, icon/badge on right */
+/* card header row */
 .card-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
 }
 
-/* Card metric label text (e.g. "CPU USAGE (/PROC/STAT)") */
+/* uppercase card metric label */
 .label {
   font-size: 0.8rem;
   font-weight: 600;
@@ -161,7 +161,7 @@ h1 {
   color: #94a3b8;
 }
 
-/* Small pill badge for showing counts */
+/* counter pill tag */
 .badge-mini {
   font-family: 'JetBrains Mono', monospace;
   font-size: 0.72rem;
@@ -171,8 +171,7 @@ h1 {
   color: #cbd5e1;
 }
 
-
-/* Large metric value display (e.g. "24.5%") */
+/* big metric value */
 .value {
   font-family: 'JetBrains Mono', monospace;
   font-size: 2.1rem;
@@ -181,7 +180,7 @@ h1 {
   color: #ffffff;
 }
 
-/* Background track for the progress bars */
+/* gauge background track */
 .bar-track {
   width: 100%;
   height: 5px;
@@ -190,20 +189,20 @@ h1 {
   overflow: hidden;
 }
 
-/* Active fill of the progress bar with smooth width transition */
+/* animated gauge fill bar */
 .bar-fill {
   height: 100%;
   border-radius: 1px;
-  transition: width 0.3s ease;  /* smooth bar animation when numbers change */
+  transition: width 0.3s ease;
 }
 
-/* Progress bar accent colors for each metric */
-.bar-cpu { background: #38bdf8; }   /* sky blue for CPU */
-.bar-ram { background: #34d399; }   /* emerald green for RAM */
-.bar-temp { background: #fb923c; }  /* amber/orange for temperature */
-.bar-fan { background: #a78bfa; }   /* purple for fan speed */
+/* metric accent colors */
+.bar-cpu { background: #38bdf8; }   /* sky blue for cpu */
+.bar-ram { background: #34d399; }   /* emerald green for ram */
+.bar-temp { background: #fb923c; }  /* amber orange for temp */
+.bar-fan { background: #a78bfa; }   /* purple for fan */
 
-/* Sparkline mini-charts inside vitals cards */
+/* canvas sparkline mini chart */
 .sparkline {
   width: 100%;
   height: 36px;
@@ -212,13 +211,13 @@ h1 {
   background: rgba(0, 0, 0, 0.2);
 }
 
-/* Special card styling for the forensic logs & diagnostics */
+/* audit log container */
 .log-card {
   gap: 12px;
   padding: 16px 20px 20px;
 }
 
-/* Tab button strip */
+/* tab selector buttons */
 .tab-buttons {
   display: flex;
   gap: 8px;
@@ -252,23 +251,23 @@ h1 {
   color: #38bdf8;
 }
 
-/* Scrollable container so long lists don't break layout */
+/* scrollable wrapper for tables */
 .table-container {
   overflow-x: auto;
-  max-height: 240px;           /* limits height and adds vertical scroll */
+  max-height: 240px;
   border-radius: 2px;
   border: 1px solid rgba(255, 255, 255, 0.05);
   background: #0d1220;
 }
 
-/* Forensic audit events table styling */
+/* forensic table styles */
 .audit-table {
   width: 100%;
   border-collapse: collapse;
   font-size: 0.82rem;
 }
 
-/* Table column header cells */
+/* sticky table header */
 .audit-table th {
   background: rgba(255, 255, 255, 0.03);
   color: #94a3b8;
@@ -283,7 +282,7 @@ h1 {
   z-index: 1;
 }
 
-/* Table data rows and cells */
+/* monospace data rows */
 .audit-table td {
   padding: 8px 12px;
   border-bottom: 1px solid rgba(255, 255, 255, 0.04);
@@ -292,12 +291,12 @@ h1 {
   font-size: 0.8rem;
 }
 
-/* Row hover highlight effect */
+/* subtle row highlight on hover */
 .audit-table tr:hover td {
   background: rgba(255, 255, 255, 0.02);
 }
 
-/* Placeholder row when empty */
+/* empty state placeholder */
 .empty-hint {
   text-align: center;
   color: #64748b;
@@ -305,7 +304,7 @@ h1 {
   padding: 22px !important;
 }
 
-/* Event badges */
+/* inotify action pill badges */
 .ev-badge {
   display: inline-block;
   padding: 2px 6px;
@@ -339,7 +338,7 @@ h1 {
   border: 1px solid rgba(234, 179, 8, 0.3);
 }
 
-/* Alert state badges */
+/* alert status colors */
 .alert-triggered {
   color: #f87171;
   font-weight: 700;
@@ -350,7 +349,7 @@ h1 {
   font-weight: 600;
 }
 
-/* Session badges */
+/* session status tags */
 .session-clean {
   color: #34d399;
   font-weight: 600;

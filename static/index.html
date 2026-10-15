@@ -1,27 +1,27 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <!-- Character encoding and responsive viewport settings for mobile and desktop -->
+  <!-- responsive viewport and charset setup -->
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>System Blackbox — OS Telemetry & DBMS Monitor</title>
 
-  <!-- Google Fonts: JetBrains Mono (for numbers/logs) and Outfit (for UI text) -->
+  <!-- modern font imports -->
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@500;700;800&family=Outfit:wght@400;600;700&display=swap" rel="stylesheet">
 
-  <!-- Link to external stylesheet for layout and colors -->
+  <!-- link to external stylesheet for layout and colors -->
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
-  <!-- Main centered wrapper for the whole dashboard -->
+  <!-- main centered wrapper for dashboard -->
   <div class="container">
     
-    <!-- Header: shows title, subtitle, live status indicator, and last updated time -->
+    <!-- header: shows title, subtitle, live status indicator, and last updated time -->
     <div class="header">
       <div class="title-group">
-        <!-- Pulsing green dot showing the system is actively running -->
+        <!-- pulsing dot showing daemon heartbeat -->
         <span class="pulse" id="livePulse"></span>
         <div>
           <h1>System Blackbox</h1>
@@ -29,22 +29,22 @@
         </div>
       </div>
       
-      <!-- Metadata in the header: daemon status badge, session info, and timestamp -->
+      <!-- metadata in header: daemon status badge, session info, and timestamp -->
       <div class="header-meta">
-        <!-- Status badge turns green when C++ engine is active, red when offline -->
+        <!-- status badge indicates whether backend is recording -->
         <div class="status-badge" id="engineBadge">
           <span class="badge-dot" id="badgeDot"></span>
           <span id="engineStatus">Connecting to DB...</span>
         </div>
-        <!-- Shows the timestamp of the latest reading from SQLite -->
+        <!-- shows timestamp of latest telemetry sample -->
         <span class="timestamp" id="lastUpdated">--:--:--</span>
       </div>
     </div>
 
-    <!-- 2x2 Grid displaying the 4 core hardware vitals with Sparkline mini-charts -->
+    <!-- grid displaying hardware vitals with sparkline mini-charts -->
     <div class="grid">
       
-      <!-- Card 1: CPU Usage (read from /proc/stat) -->
+      <!-- card 1: cpu usage from /proc/stat -->
       <div class="card">
         <div class="card-header">
           <span class="label">CPU Usage (/proc/stat)</span>
@@ -56,7 +56,7 @@
         <canvas class="sparkline" id="cpuSpark" width="320" height="36"></canvas>
       </div>
 
-      <!-- Card 2: RAM Usage (read from /proc/meminfo) -->
+      <!-- card 2: ram usage from /proc/meminfo -->
       <div class="card">
         <div class="card-header">
           <span class="label">RAM Usage (/proc/meminfo)</span>
@@ -68,7 +68,7 @@
         <canvas class="sparkline" id="ramSpark" width="320" height="36"></canvas>
       </div>
 
-      <!-- Card 3: CPU Temperature (read from /sys/class/hwmon coretemp) -->
+      <!-- card 3: cpu temperature from hwmon or thermal zones -->
       <div class="card">
         <div class="card-header">
           <span class="label">CPU Temp (coretemp)</span>
@@ -80,7 +80,7 @@
         <canvas class="sparkline" id="tempSpark" width="320" height="36"></canvas>
       </div>
 
-      <!-- Card 4: Fan Speed (read from /sys/class/hwmon RPM sensors) -->
+      <!-- card 4: fan speed from hwmon sensors -->
       <div class="card">
         <div class="card-header">
           <span class="label">Fan Speed (hwmon RPM)</span>
@@ -94,7 +94,7 @@
 
     </div>
 
-    <!-- Forensic Logs & Diagnostics Card -->
+    <!-- forensic logs and diagnostics card -->
     <div class="card log-card">
       <div class="card-header">
         <div class="tab-buttons">
@@ -110,7 +110,7 @@
         </div>
       </div>
       
-      <!-- Panel 1: File Events Table -->
+      <!-- panel 1: file events table -->
       <div class="table-container tab-content" id="panelFiles">
         <table class="audit-table">
           <thead>
@@ -129,7 +129,7 @@
         </table>
       </div>
 
-      <!-- Panel 2: Alerts Table -->
+      <!-- panel 2: alerts table -->
       <div class="table-container tab-content" id="panelAlerts" style="display: none;">
         <table class="audit-table">
           <thead>
@@ -150,7 +150,7 @@
         </table>
       </div>
 
-      <!-- Panel 3: Sessions & Crash Detection Table -->
+      <!-- panel 3: sessions and crash detection table -->
       <div class="table-container tab-content" id="panelSessions" style="display: none;">
         <table class="audit-table">
           <thead>
@@ -175,7 +175,7 @@
 
   </div>
 
-  <!-- Client-side script to poll the API and update numbers, sparklines, and tables -->
+  <!-- client-side script to poll api endpoints and update dashboard -->
   <script src="app.js"></script>
 </body>
 </html>

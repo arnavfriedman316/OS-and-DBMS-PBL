@@ -1,26 +1,16 @@
--- ============================================================================
--- schema.sql — System Blackbox Table Definitions (DDL)
--- ============================================================================
--- Database: blackbox (MySQL / MariaDB & PostgreSQL compatible)
---
--- Tables:
---   1. sessions      : Tracks each run of the C++ daemon (PID, start/end, crash detection)
---   2. vitals_log    : Time-series CPU %, RAM %, Core Temp °C, Fan RPM
---   3. deleted_files : Forensic inotify audit trail (deletions, renames, moves)
---   4. alerts        : Threshold alert state changes (TRIGGERED / RESOLVED with hysteresis)
--- ============================================================================
+-- database schema definitions for mysql and mariadb backends
 
--- Table 1: Sessions (Used for process crash detection)
+-- tracks daemon lifecycles so we can detect ungraceful terminations
 CREATE TABLE IF NOT EXISTS sessions (
     id BIGINT AUTO_INCREMENT PRIMARY KEY,
     start_time VARCHAR(25) NOT NULL,
     end_time VARCHAR(25) NULL,
     pid INT NOT NULL,
     hostname VARCHAR(255) NULL,
-    clean_exit TINYINT NULL -- 1 = clean shutdown (SIGINT/SIGTERM), 0 = crash/kill -9, NULL = running
+    clean_exit TINYINT NULL -- clean_exit: 1 = clean exit on SIGINT or SIGTERM, 0 = crashed, NULL = currently active
 ) ENGINE=InnoDB;
 
--- Table 2: System Vitals (Time-series telemetry sampled every second)
+-- stores time-series hardware readings sampled every second with secondary indexes
 CREATE TABLE IF NOT EXISTS vitals_log (
     id BIGINT AUTO_INCREMENT PRIMARY KEY,
     timestamp VARCHAR(25) NOT NULL,
@@ -33,7 +23,7 @@ CREATE TABLE IF NOT EXISTS vitals_log (
     INDEX idx_vitals_session (session_id)
 ) ENGINE=InnoDB;
 
--- Table 3: Forensic File Auditing (Kernel Inotify events)
+-- forensic audit log for file operations caught by inotify
 CREATE TABLE IF NOT EXISTS deleted_files (
     id BIGINT AUTO_INCREMENT PRIMARY KEY,
     timestamp VARCHAR(25) NOT NULL,
@@ -46,14 +36,14 @@ CREATE TABLE IF NOT EXISTS deleted_files (
     INDEX idx_files_session (session_id)
 ) ENGINE=InnoDB;
 
--- Table 4: Threshold Alerts (Hysteresis monitoring log)
+-- history of threshold breaches and resolutions
 CREATE TABLE IF NOT EXISTS alerts (
     id BIGINT AUTO_INCREMENT PRIMARY KEY,
     timestamp VARCHAR(25) NOT NULL,
     metric VARCHAR(64) NOT NULL,
     value DOUBLE NOT NULL,
     threshold DOUBLE NOT NULL,
-    state VARCHAR(32) NOT NULL, -- 'TRIGGERED' or 'RESOLVED'
+    state VARCHAR(32) NOT NULL,
     session_id BIGINT NULL,
     INDEX idx_alerts_ts (timestamp),
     INDEX idx_alerts_session (session_id)

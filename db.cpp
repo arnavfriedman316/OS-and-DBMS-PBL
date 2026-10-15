@@ -1,13 +1,4 @@
-// ============================================================================
-// db.cpp — Database Manager Implementation (MySQL/MariaDB + SQLite Fallback)
-// ============================================================================
-// System Blackbox — Phase 2 (50% Completion Milestone)
-// University PBL: Operating Systems + Database Management Systems
-//
-// This file implements dual-backend persistence:
-//   1. Enterprise Relational Database: MySQL / MariaDB (via native C API)
-//   2. Local Embedded Database: SQLite3 (Write-Ahead Logging WAL mode)
-// ============================================================================
+// database manager handling dual backend persistence: mysql and sqlite fallback
 
 #include "db.hpp"
 
@@ -16,22 +7,15 @@
 #include <chrono>
 #include <ctime>
 
-// ────────────────────────────────────────────────────────────────────────────
-// Construction / Destruction
-// ────────────────────────────────────────────────────────────────────────────
-
+// constructor and destructor
 DatabaseManager::DatabaseManager() = default;
 
+// cleans up open database handles on destruction
 DatabaseManager::~DatabaseManager() {
     close();
 }
 
-// ────────────────────────────────────────────────────────────────────────────
-// Helper: current_timestamp
-// ────────────────────────────────────────────────────────────────────────────
-// Returns local time as "YYYY-MM-DD HH:MM:SS".
-// Uses thread-safe localtime_r instead of non-reentrant std::localtime.
-// ────────────────────────────────────────────────────────────────────────────
+// formats current system time into yyyy-mm-dd hh:mm:ss string using reentrant localtime_r
 std::string DatabaseManager::current_timestamp() {
     std::time_t now_c = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
     std::tm tm_buf{};
@@ -42,11 +26,7 @@ std::string DatabaseManager::current_timestamp() {
     return out;
 }
 
-// ────────────────────────────────────────────────────────────────────────────
-// Helper: escape_mysql
-// ────────────────────────────────────────────────────────────────────────────
-// Prevents SQL Injection vulnerabilities by escaping special characters.
-// ────────────────────────────────────────────────────────────────────────────
+// escapes strings using mysql_real_escape_string to block sql injection
 std::string DatabaseManager::escape_mysql(std::string_view s) {
     if (!mysql_handle_ || s.empty()) return std::string(s);
     std::string out;
@@ -56,10 +36,7 @@ std::string DatabaseManager::escape_mysql(std::string_view s) {
     return out;
 }
 
-// ────────────────────────────────────────────────────────────────────────────
-// Public init() entry points
-// ────────────────────────────────────────────────────────────────────────────
-
+// pick active backend based on DatabaseConfig, with graceful fallback to sqlite if mysql is down
 bool DatabaseManager::init(const DatabaseConfig& cfg) {
     std::lock_guard<std::mutex> lock(db_mutex_);
 
@@ -79,7 +56,7 @@ bool DatabaseManager::init(const DatabaseConfig& cfg) {
         return false;
     }
 
-    // Explicit SQLite request
+    // explicit sqlite request
     if (init_sqlite(cfg.sqlite_path)) {
         active_backend_ = BackendType::SQLite;
         return true;
@@ -87,17 +64,15 @@ bool DatabaseManager::init(const DatabaseConfig& cfg) {
     return false;
 }
 
+// quick overload for backwards compatibility defaulting to mysql with fallback
 bool DatabaseManager::init(const std::string& db_path) {
     DatabaseConfig cfg;
     cfg.sqlite_path = db_path;
-    cfg.backend = BackendType::MySQL;  // Try MySQL first, fall back to db_path
+    cfg.backend = BackendType::MySQL;  // try mysql first, fall back to db_path
     return init(cfg);
 }
 
-// ────────────────────────────────────────────────────────────────────────────
-// MySQL Initialization & DDL
-// ────────────────────────────────────────────────────────────────────────────
-
+// connect to mysql daemon via socket or tcp and create schema
 bool DatabaseManager::init_mysql(const DatabaseConfig& cfg) {
     mysql_handle_ = mysql_init(nullptr);
     if (!mysql_handle_) {
@@ -135,6 +110,7 @@ bool DatabaseManager::init_mysql(const DatabaseConfig& cfg) {
     return create_mysql_schema();
 }
 
+// create required tables and secondary indexes in mysql if they do not exist
 bool DatabaseManager::create_mysql_schema() {
     const char* ddl = R"SQL(
         CREATE TABLE IF NOT EXISTS sessions (
@@ -188,7 +164,7 @@ bool DatabaseManager::create_mysql_schema() {
         return false;
     }
 
-    // Consume all multi-statement results
+    // consume all multi-statement results from ddl batch
     while (mysql_next_result(mysql_handle_) == 0) {
         MYSQL_RES* res = mysql_store_result(mysql_handle_);
         if (res) mysql_free_result(res);
@@ -198,10 +174,7 @@ bool DatabaseManager::create_mysql_schema() {
     return true;
 }
 
-// ────────────────────────────────────────────────────────────────────────────
-// SQLite Initialization & DDL
-// ────────────────────────────────────────────────────────────────────────────
-
+// execute raw sqlite query string and log errors if it fails
 bool DatabaseManager::execute_sqlite_query(const char* sql) {
     char* err_msg = nullptr;
     int rc = sqlite3_exec(sqlite_handle_, sql, nullptr, nullptr, &err_msg);
@@ -213,6 +186,7 @@ bool DatabaseManager::execute_sqlite_query(const char* sql) {
     return true;
 }
 
+// check pragma table_info and run alter table if an older database lacks new columns
 bool DatabaseManager::add_sqlite_column_if_missing(const char* table, const char* column, const char* decl) {
     std::string pragma = std::string("PRAGMA table_info(") + table + ");";
     sqlite3_stmt* stmt = nullptr;
@@ -236,6 +210,7 @@ bool DatabaseManager::add_sqlite_column_if_missing(const char* table, const char
     return execute_sqlite_query(alter.c_str());
 }
 
+// compile a prepared statement and check return code
 bool DatabaseManager::prepare_sqlite_stmt(const char* sql, sqlite3_stmt** out) {
     if (sqlite3_prepare_v2(sqlite_handle_, sql, -1, out, nullptr) != SQLITE_OK) {
         std::cerr << "[DBMS ERROR] SQLite prepare failed: " << sqlite3_errmsg(sqlite_handle_)
@@ -245,6 +220,7 @@ bool DatabaseManager::prepare_sqlite_stmt(const char* sql, sqlite3_stmt** out) {
     return true;
 }
 
+// open local sqlite file, turn on wal mode for concurrency, and prepare statements
 bool DatabaseManager::init_sqlite(const std::string& db_path) {
     int rc = sqlite3_open(db_path.c_str(), &sqlite_handle_);
     if (rc != SQLITE_OK) {
@@ -258,6 +234,7 @@ bool DatabaseManager::init_sqlite(const std::string& db_path) {
 
     sqlite3_busy_timeout(sqlite_handle_, 2000);
 
+    // wal mode allows concurrent readers while daemon writes
     if (!execute_sqlite_query("PRAGMA journal_mode = WAL;")) {
         std::cerr << "[DBMS ERROR] Failed to enable SQLite WAL mode.\n";
         return false;
@@ -267,6 +244,7 @@ bool DatabaseManager::init_sqlite(const std::string& db_path) {
     return create_sqlite_schema();
 }
 
+// create tables, migrate missing columns, and prepare insert statements in sqlite
 bool DatabaseManager::create_sqlite_schema() {
     const char* schema_sql = R"SQL(
         CREATE TABLE IF NOT EXISTS sessions (
@@ -308,6 +286,7 @@ bool DatabaseManager::create_sqlite_schema() {
         return false;
     }
 
+    // handle schema migrations on existing database files
     add_sqlite_column_if_missing("vitals_log",    "cpu_temp",   "REAL DEFAULT 0.0");
     add_sqlite_column_if_missing("vitals_log",    "fan_speed",  "INTEGER DEFAULT 0");
     add_sqlite_column_if_missing("vitals_log",    "session_id", "INTEGER REFERENCES sessions(id)");
@@ -316,11 +295,13 @@ bool DatabaseManager::create_sqlite_schema() {
     add_sqlite_column_if_missing("deleted_files", "new_name",   "TEXT");
     add_sqlite_column_if_missing("deleted_files", "session_id", "INTEGER REFERENCES sessions(id)");
 
+    // create indexes for faster time-series and session filtering
     execute_sqlite_query("CREATE INDEX IF NOT EXISTS idx_vitals_ts      ON vitals_log(timestamp);");
     execute_sqlite_query("CREATE INDEX IF NOT EXISTS idx_vitals_session ON vitals_log(session_id);");
     execute_sqlite_query("CREATE INDEX IF NOT EXISTS idx_files_ts       ON deleted_files(timestamp);");
     execute_sqlite_query("CREATE INDEX IF NOT EXISTS idx_alerts_ts      ON alerts(timestamp);");
 
+    // pre-compile insert statements for high-throughput logging
     bool ok =
         prepare_sqlite_stmt("INSERT INTO vitals_log (timestamp, cpu_usage, ram_usage, cpu_temp, fan_speed, session_id) VALUES (?, ?, ?, ?, ?, ?);", &stmt_vitals_) &&
         prepare_sqlite_stmt("INSERT INTO deleted_files (timestamp, file_name, event_type, is_dir, new_name, session_id) VALUES (?, ?, ?, ?, ?, ?);", &stmt_file_) &&
@@ -335,10 +316,7 @@ bool DatabaseManager::create_sqlite_schema() {
     return true;
 }
 
-// ────────────────────────────────────────────────────────────────────────────
-// Sessions & Crash Detection
-// ────────────────────────────────────────────────────────────────────────────
-
+// find previous runs that were interrupted without closing cleanly
 std::vector<SessionInfo> DatabaseManager::find_open_sessions() {
     std::lock_guard<std::mutex> lock(db_mutex_);
     std::vector<SessionInfo> result;
@@ -371,7 +349,7 @@ std::vector<SessionInfo> DatabaseManager::find_open_sessions() {
         return result;
     }
 
-    // SQLite
+    // fallback query for sqlite
     if (!sqlite_handle_) return result;
     const char* sql =
         "SELECT s.id, s.start_time, s.pid, IFNULL(s.hostname, ''), "
@@ -396,6 +374,7 @@ std::vector<SessionInfo> DatabaseManager::find_open_sessions() {
     return result;
 }
 
+// mark an abandoned session as crashed with clean_exit = 0
 bool DatabaseManager::mark_session_crashed(const SessionInfo& s) {
     std::lock_guard<std::mutex> lock(db_mutex_);
 
@@ -420,6 +399,7 @@ bool DatabaseManager::mark_session_crashed(const SessionInfo& s) {
     return ok;
 }
 
+// write a new row in sessions table for this running process
 bool DatabaseManager::begin_session(int pid, const std::string& hostname) {
     std::lock_guard<std::mutex> lock(db_mutex_);
     const std::string ts = current_timestamp();
@@ -452,6 +432,7 @@ bool DatabaseManager::begin_session(int pid, const std::string& hostname) {
     return ok;
 }
 
+// mark current session cleanly closed with clean_exit = 1
 bool DatabaseManager::end_session() {
     std::lock_guard<std::mutex> lock(db_mutex_);
     if (session_id_ == 0) return false;
@@ -478,10 +459,7 @@ bool DatabaseManager::end_session() {
     return ok;
 }
 
-// ────────────────────────────────────────────────────────────────────────────
-// Logging Functions (Vitals, File Events, Alerts)
-// ────────────────────────────────────────────────────────────────────────────
-
+// append a telemetry sample to vitals_log table
 bool DatabaseManager::log_vitals(double cpu_usage, double ram_usage, double cpu_temp, int fan_speed) {
     std::lock_guard<std::mutex> lock(db_mutex_);
     const std::string ts = current_timestamp();
@@ -510,6 +488,7 @@ bool DatabaseManager::log_vitals(double cpu_usage, double ram_usage, double cpu_
     return (sqlite3_step(stmt_vitals_) == SQLITE_DONE);
 }
 
+// insert a file event like deletion, rename, or move into deleted_files table
 bool DatabaseManager::log_file_event(std::string_view file_name, std::string_view event_type,
                                      bool is_dir, std::string_view new_name) {
     std::lock_guard<std::mutex> lock(db_mutex_);
@@ -541,10 +520,12 @@ bool DatabaseManager::log_file_event(std::string_view file_name, std::string_vie
     return (sqlite3_step(stmt_file_) == SQLITE_DONE);
 }
 
+// backward compatible alias for file deletion
 bool DatabaseManager::log_deleted_file(std::string_view file_name) {
     return log_file_event(file_name, "DELETED");
 }
 
+// log an alert trigger or resolve state transition
 bool DatabaseManager::log_alert(std::string_view metric, double value, double threshold,
                                 std::string_view state) {
     std::lock_guard<std::mutex> lock(db_mutex_);
@@ -574,10 +555,7 @@ bool DatabaseManager::log_alert(std::string_view metric, double value, double th
     return (sqlite3_step(stmt_alert_) == SQLITE_DONE);
 }
 
-// ────────────────────────────────────────────────────────────────────────────
-// Data Retention Purge
-// ────────────────────────────────────────────────────────────────────────────
-
+// delete telemetry older than given days to keep disk usage reasonable
 int DatabaseManager::purge_old_vitals(int days) {
     std::lock_guard<std::mutex> lock(db_mutex_);
     if (days <= 0) return 0;
@@ -610,10 +588,7 @@ int DatabaseManager::purge_old_vitals(int days) {
     return deleted;
 }
 
-// ────────────────────────────────────────────────────────────────────────────
-// Close & Statement Finalization
-// ────────────────────────────────────────────────────────────────────────────
-
+// clean up compiled sqlite statements
 void DatabaseManager::finalize_sqlite_statements() {
     sqlite3_finalize(stmt_vitals_);
     sqlite3_finalize(stmt_file_);
@@ -621,6 +596,7 @@ void DatabaseManager::finalize_sqlite_statements() {
     stmt_vitals_ = stmt_file_ = stmt_alert_ = nullptr;
 }
 
+// close mysql and sqlite connections safely
 void DatabaseManager::close() {
     std::lock_guard<std::mutex> lock(db_mutex_);
 

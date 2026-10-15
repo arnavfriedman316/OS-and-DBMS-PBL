@@ -1,14 +1,5 @@
 #!/usr/bin/env python3
-"""
-server.py — System Blackbox Web Telemetry Server
-Supports MySQL / MariaDB (via pymysql) with automatic SQLite fallback.
-Exposes clean REST endpoints consumed by the dashboard:
-  - GET /api/metrics   (Live vitals, daemon liveness, active session)
-  - GET /api/deletions (Forensic file audit trail)
-  - GET /api/alerts    (Threshold alerts log and active count)
-  - GET /api/sessions  (Session crash detection history)
-  - GET /api/history   (Downsampled historical telemetry for sparklines)
-"""
+# web telemetry server exposing rest endpoints for dashboard
 
 import argparse
 import datetime
@@ -20,7 +11,7 @@ import sys
 import urllib.parse
 from pathlib import Path
 
-# Try importing pymysql for MySQL support
+# try loading pymysql for mysql connectivity
 try:
     import pymysql
     import pymysql.cursors
@@ -28,13 +19,14 @@ try:
 except ImportError:
     HAVE_PYMYSQL = False
 
+# base paths and server defaults
 BASE_DIR = Path(__file__).resolve().parent
 STATIC_DIR = BASE_DIR / "static"
 CONFIG_FILE = BASE_DIR / "blackbox.conf"
 DEFAULT_PORT = 8080
 DEFAULT_HOST = "0.0.0.0"
 
-# Default configuration dictionary
+# default configuration dictionary
 CONFIG = {
     "db_backend": "mysql",
     "mysql_host": "127.0.0.1",
@@ -49,8 +41,8 @@ CONFIG = {
 }
 
 
+# parse key = value settings from blackbox.conf
 def load_config():
-    """Parses key = value settings from blackbox.conf."""
     if not CONFIG_FILE.exists():
         return
     try:
@@ -72,15 +64,11 @@ def load_config():
         print(f"[SERVER WARNING] Error reading {CONFIG_FILE}: {e}")
 
 
+# connects to mysql if available, else falls back to sqlite; caller closes connection
 def get_db():
-    """
-    Returns (conn, backend_name).
-    Tries MySQL first (if configured/available), otherwise falls back to SQLite.
-    Caller must close conn when done.
-    """
-    # 1. Try MySQL if enabled
+    # 1. try mysql connection if enabled
     if CONFIG["db_backend"] != "sqlite" and HAVE_PYMYSQL:
-        # Try reader user first, then writer
+        # try reader credentials first, then fall back to writer
         users_to_try = [
             (CONFIG["mysql_reader_user"], CONFIG["mysql_reader_password"]),
             (CONFIG["mysql_user"], CONFIG["mysql_password"]),
@@ -102,7 +90,7 @@ def get_db():
             except Exception:
                 continue
 
-    # 2. SQLite fallback
+    # 2. sqlite fallback
     sqlite_path = BASE_DIR / CONFIG["sqlite_path"]
     if sqlite_path.exists():
         try:
@@ -116,8 +104,8 @@ def get_db():
     return None, "None"
 
 
+# gets latest hardware vitals reading and checks if daemon is actively logging
 def get_latest_vitals_from_db():
-    """Gets the most recent vitals reading with real-time daemon liveness checking."""
     conn, backend = get_db()
     if not conn:
         return {
@@ -218,8 +206,8 @@ def get_latest_vitals_from_db():
         conn.close()
 
 
+# gets recent file audit events from inotify along with total count
 def get_deleted_files_from_db():
-    """Gets recent forensic file events and total count."""
     conn, backend = get_db()
     if not conn:
         return {"items": [], "total_count": 0, "db_backend": "None"}
@@ -260,8 +248,8 @@ def get_deleted_files_from_db():
         conn.close()
 
 
+# gets recent threshold alerts and counts currently active triggers
 def get_alerts_from_db():
-    """Gets recent threshold alerts and active count."""
     conn, backend = get_db()
     if not conn:
         return {"items": [], "active_count": 0, "db_backend": "None"}
@@ -313,8 +301,8 @@ def get_alerts_from_db():
         conn.close()
 
 
+# pulls session log history to display daemon runs and crash status
 def get_sessions_from_db():
-    """Gets session logs for crash detection."""
     conn, backend = get_db()
     if not conn:
         return {"items": [], "has_crashed": False, "db_backend": "None"}
@@ -336,7 +324,7 @@ def get_sessions_from_db():
                 "end_time": str(r["end_time"]) if r["end_time"] else None,
                 "pid": r["pid"],
                 "hostname": r["hostname"],
-                "clean_exit": r["clean_exit"],  # 1=clean, 0=crashed, None=running
+                "clean_exit": r["clean_exit"],  # 1 = clean, 0 = crashed, null = running
             }
             for r in rows
         ]
@@ -348,8 +336,8 @@ def get_sessions_from_db():
         conn.close()
 
 
+# gets historical vitals sampled down for sparkline charts
 def get_history_from_db(minutes=10):
-    """Gets historical vitals bucketed or sampled for canvas sparklines."""
     minutes = max(1, min(int(minutes), 120))
     conn, backend = get_db()
     if not conn:
@@ -378,7 +366,7 @@ def get_history_from_db(minutes=10):
         rows = list(cursor.fetchall())
         total_rows = len(rows)
 
-        # Downsample to ~50 points if large dataset
+        # downsample to roughly 50 points if dataset is large
         target_pts = 50
         if total_rows > target_pts:
             step = total_rows / target_pts
@@ -404,10 +392,12 @@ def get_history_from_db(minutes=10):
         conn.close()
 
 
+# http request handler routing rest endpoints and serving static assets
 class BlackboxHttpHandler(http.server.SimpleHTTPRequestHandler):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, directory=str(STATIC_DIR), **kwargs)
 
+    # route api endpoints to their json generators
     def do_GET(self):
         parsed = urllib.parse.urlparse(self.path)
         path = parsed.path
@@ -438,6 +428,7 @@ class BlackboxHttpHandler(http.server.SimpleHTTPRequestHandler):
             self.path = "/index.html"
         return super().do_GET()
 
+    # helper to serialize dictionary and write json response headers
     def send_json(self, data, status=200):
         body = json.dumps(data, indent=2).encode("utf-8")
         self.send_response(status)
@@ -448,10 +439,12 @@ class BlackboxHttpHandler(http.server.SimpleHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    # silence default request logging to keep terminal tidy
     def log_message(self, format, *args):
-        pass  # keep console quiet
+        pass
 
 
+# starts http server, attempting nearby ports if default port is occupied
 def run_server(host=DEFAULT_HOST, port=DEFAULT_PORT):
     load_config()
     for p in range(port, port + 10):
@@ -470,11 +463,12 @@ def run_server(host=DEFAULT_HOST, port=DEFAULT_PORT):
                 server.server_close()
             return
         except OSError as e:
-            if e.errno == 98:  # Address in use
+            if e.errno == 98:  # address in use
                 continue
             raise
 
 
+# parse cli arguments and start web dashboard server
 def main():
     parser = argparse.ArgumentParser(description="System Blackbox Telemetry Web Server")
     parser.add_argument("--backend", type=str, choices=["mysql", "sqlite"], help="Force database backend")

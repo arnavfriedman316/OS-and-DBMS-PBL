@@ -1,77 +1,50 @@
-// ============================================================================
-// main.cpp — System Blackbox Engine (OS Telemetry & Kernel File Monitor)
-// ============================================================================
-// University PBL: Operating Systems + Database Management Systems
-//
-// ARCHITECTURE:
-//   • Thread 1 (Sensor Thread):
-//       Reads /proc/stat, /proc/meminfo, and /sys/class/hwmon every interval.
-//       Writes vitals into SQLite (vitals_log) and raises threshold alerts (alerts).
-//
-//   • Thread 2 (Inotify Thread):
-//       Monitors directory 'test_watch' for file deletions / moves / renames via
-//       Linux inotify. Writes forensic logs into SQLite (deleted_files table).
-//
-//   • Sessions (crash detection):
-//       Every run is a row in `sessions`. If the previous run never closed its
-//       session, it crashed / was killed / lost power — we report it at startup.
-//
-//   • Database Layer (Thread-Safe WAL Mode):
-//       Guards SQLite connection using std::mutex; readers (Python server)
-//       never block writers (C++ daemon) thanks to Write-Ahead Logging (WAL).
-//
-//   • Signal Handling & RAII:
-//       Graceful SIGINT/SIGTERM shutdown, clean thread joins, and auto-cleanup.
-// ============================================================================
+// system blackbox main daemon entrypoint and worker thread orchestration
 
 #include "db.hpp"
 #include "sensors.hpp"
 #include "alerts.hpp"
 
 #include <iostream>
-#include <sstream>       // for building one output line before printing it
-#include <iomanip>       // for std::setw, std::fixed (formatting output)
-#include <thread>        // for std::thread (OS threads)
-#include <atomic>        // for std::atomic (thread-safe flag)
-#include <mutex>         // for the console output mutex
-#include <chrono>        // for sleep durations
-#include <csignal>       // for sigaction() and SIGINT/SIGTERM
-#include <filesystem>    // for creating test_watch/ directory
-#include <fstream>       // for reading /proc/<pid>/comm
-#include <unordered_map> // for pairing IN_MOVED_FROM / IN_MOVED_TO events
-#include <cstring>       // for strerror()
-#include <cerrno>        // for errno
+#include <sstream>
+#include <iomanip>
+#include <thread>
+#include <atomic>
+#include <mutex>
+#include <chrono>
+#include <csignal>
+#include <filesystem>
+#include <fstream>
+#include <unordered_map>
+#include <cstring>
+#include <cerrno>
 
-#include <sys/inotify.h>  // Linux kernel inotify API (file event monitoring)
-#include <poll.h>         // poll() syscall (wait for I/O events)
-#include <unistd.h>       // read(), close(), getpid(), gethostname(), readlink()
+#include <sys/inotify.h>
+#include <poll.h>
+#include <unistd.h>
 
 namespace fs = std::filesystem;
 using namespace std::chrono_literals;
 
-// atomic bool so all threads can safely check if we should keep running
-// set to false when user presses Ctrl+C
+// flag for threads to exit loops when a termination signal arrives
 static std::atomic<bool> g_running{true};
-static std::atomic<int>  g_signal{0};    // which signal stopped us (printed after shutdown)
+// stores the numeric signal that told us to shut down
+static std::atomic<int>  g_signal{0};
 
-// Both threads print to the terminal; this mutex stops their lines from mixing together
+// mutex so output from sensor and inotify threads don't get interleaved
 static std::mutex g_out_mutex;
+// thread-safe console output printer
 static void say(const std::string& line, bool to_stderr = false) {
     std::lock_guard<std::mutex> lock(g_out_mutex);
     (to_stderr ? std::cerr : std::cout) << line << std::endl;
 }
 
-// called by the OS when SIGINT (Ctrl+C) or SIGTERM (kill) is received.
-// A signal handler may interrupt ANY code (even in the middle of std::cout),
-// so it must only do async-signal-safe things: here, just set two atomics.
+// async-signal-safe handler that just sets atomics on SIGINT or SIGTERM
 static void signal_handler(int signum) {
     g_signal.store(signum);
-    g_running.store(false);  // tell all threads to exit their loops
+    g_running.store(false);
 }
 
-// ────────────────────────────────────────────────────────────────────────────
-// Command-line & Configuration File Management
-// ────────────────────────────────────────────────────────────────────────────
+// runtime configuration parsed from blackbox.conf and cli arguments
 struct Config {
     std::string db_backend     = "mysql"; // "mysql" or "sqlite"
     std::string mysql_host     = "127.0.0.1";
@@ -88,10 +61,11 @@ struct Config {
     int    retention_days = 7;     // purge vitals older than this (0 = keep forever)
     double cpu_alert     = 90.0;   // %   (0 disables)
     double ram_alert     = 90.0;   // %   (0 disables)
-    double temp_alert    = 85.0;   // °C  (0 disables)
+    double temp_alert    = 85.0;   // celsius (0 disables)
     bool   quiet         = false;  // don't print a line for every sample
 };
 
+// print available command line options
 static void print_usage(const char* prog) {
     std::cout <<
         "Usage: " << prog << " [options]\n"
@@ -113,7 +87,7 @@ static void print_usage(const char* prog) {
         "  -h, --help               Show this help\n";
 }
 
-// Directory containing the running executable.
+// locate directory containing the running executable using /proc/self/exe
 static fs::path exe_dir() {
     char buf[4096];
     ssize_t n = readlink("/proc/self/exe", buf, sizeof(buf) - 1);
@@ -122,14 +96,14 @@ static fs::path exe_dir() {
     return fs::path(buf).parent_path();
 }
 
-// Loads key = value settings from blackbox.conf if present
+// parse key = value settings from blackbox.conf
 static void load_config_file(const fs::path& conf_path, Config& cfg) {
     std::ifstream ifs(conf_path);
     if (!ifs.is_open()) return;
 
     std::string line;
     while (std::getline(ifs, line)) {
-        // Strip comments and whitespace
+        // strip comments and whitespace
         auto hash_pos = line.find('#');
         if (hash_pos != std::string::npos) line = line.substr(0, hash_pos);
         auto eq_pos = line.find('=');
@@ -162,13 +136,13 @@ static void load_config_file(const fs::path& conf_path, Config& cfg) {
     }
 }
 
-// Returns 0 = OK, 1 = exit successfully (--help), 2 = bad arguments
+// process command line options and override config defaults
 static int parse_args(int argc, char** argv, Config& cfg) {
     const fs::path base = exe_dir();
     cfg.db_path   = (base / "blackbox.db").string();
     cfg.watch_dir = (base / "test_watch").string();
 
-    // Check for blackbox.conf next to binary or in current directory
+    // check for blackbox.conf next to binary or in current directory
     if (fs::exists(base / "blackbox.conf")) {
         load_config_file(base / "blackbox.conf", cfg);
     } else if (fs::exists("blackbox.conf")) {
@@ -225,30 +199,24 @@ static int parse_args(int argc, char** argv, Config& cfg) {
     return 0;
 }
 
-// ────────────────────────────────────────────────────────────────────────────
-// Single-instance check
-// ────────────────────────────────────────────────────────────────────────────
-// Is `pid` a live system_blackbox process? kill(pid, 0) sends no signal — it
-// only asks the kernel "does this process exist?". PIDs get reused, so we also
-// check the process name in /proc/<pid>/comm.
+// check if a PID belongs to an active blackbox process
 static bool process_is_blackbox(int pid) {
     if (pid <= 0) return false;
-    if (kill(pid, 0) != 0 && errno != EPERM) return false;   // EPERM = exists but not ours
+    if (kill(pid, 0) != 0 && errno != EPERM) return false;
     std::ifstream comm("/proc/" + std::to_string(pid) + "/comm");
     std::string name;
     std::getline(comm, name);
     return name == "system_blackbox";
 }
 
+// get system hostname for session accounting
 static std::string get_hostname() {
     char buf[256] = {0};
     if (gethostname(buf, sizeof(buf) - 1) != 0) return "unknown";
     return buf;
 }
 
-// ────────────────────────────────────────────────────────────────────────────
-// Thread 1: Hardware Vitals Monitoring (/proc & /sys) + threshold alerts
-// ────────────────────────────────────────────────────────────────────────────
+// thread 1: periodic hardware telemetry sampler and threshold watcher
 void sensor_worker(DatabaseManager& db, HardwareSensorReader& reader, const Config& cfg) {
     {
         std::ostringstream os;
@@ -256,7 +224,7 @@ void sensor_worker(DatabaseManager& db, HardwareSensorReader& reader, const Conf
         say(os.str());
     }
 
-    // one monitor per metric: (column name, threshold, hysteresis margin, samples needed)
+    // monitor metrics against configured threshold limits
     ThresholdMonitor monitors[] = {
         {"cpu_usage", cfg.cpu_alert,  10.0, 3},
         {"ram_usage", cfg.ram_alert,   5.0, 3},
@@ -266,28 +234,27 @@ void sensor_worker(DatabaseManager& db, HardwareSensorReader& reader, const Conf
     const auto interval   = std::chrono::duration_cast<std::chrono::steady_clock::duration>(
                                 std::chrono::duration<double>(cfg.interval));
     auto next_tick        = std::chrono::steady_clock::now() + interval;
-    auto last_purge       = std::chrono::steady_clock::now();   // main() already purged once at startup
+    auto last_purge       = std::chrono::steady_clock::now();
 
     while (g_running.load()) {
-        // Sleep until the next tick in 100ms slices so Ctrl+C is handled quickly.
-        // Waiting BEFORE the first read also fixes the first CPU sample: the
-        // baseline was taken in the constructor, so we need a real gap.
+        // sleep in short slices so ctrl+c or kill signals break immediately
         while (g_running.load() && std::chrono::steady_clock::now() < next_tick) {
             auto left = next_tick - std::chrono::steady_clock::now();
             std::this_thread::sleep_for(std::min<std::chrono::steady_clock::duration>(left, 100ms));
         }
         if (!g_running.load()) break;
 
-        // schedule from the previous tick (no drift); if we fell far behind, restart the schedule
+        // advance target tick without letting timer drift accumulate
         next_tick += interval;
         if (next_tick < std::chrono::steady_clock::now()) next_tick = std::chrono::steady_clock::now() + interval;
 
+        // grab snapshot of cpu, ram, temp, and fan metrics
         SystemVitals v = reader.read_all();
 
-        // Write directly to SQLite via thread-safe DatabaseManager
+        // persist readings to database
         db.log_vitals(v.cpu_usage, v.ram_usage, v.cpu_temp, v.fan_speed);
 
-        // check every threshold monitor
+        // evaluate threshold alert triggers and resolutions
         for (auto& m : monitors) {
             double value = (m.metric() == "cpu_usage") ? v.cpu_usage
                          : (m.metric() == "ram_usage") ? v.ram_usage
@@ -305,6 +272,7 @@ void sensor_worker(DatabaseManager& db, HardwareSensorReader& reader, const Conf
             say(os.str());
         }
 
+        // print metrics to stdout if not in quiet mode
         if (!cfg.quiet) {
             std::ostringstream os;
             os << std::fixed << std::setprecision(1)
@@ -315,7 +283,7 @@ void sensor_worker(DatabaseManager& db, HardwareSensorReader& reader, const Conf
             say(os.str());
         }
 
-        // data retention: purge old vitals once an hour
+        // run retention purge once an hour to clean up old telemetry
         if (cfg.retention_days > 0 && std::chrono::steady_clock::now() - last_purge >= 1h) {
             int n = db.purge_old_vitals(cfg.retention_days);
             if (n > 0) say("[DBMS] Retention: purged " + std::to_string(n) + " old vitals rows.");
@@ -326,26 +294,12 @@ void sensor_worker(DatabaseManager& db, HardwareSensorReader& reader, const Conf
     say("[THREAD 1] Hardware Sensor thread exiting.");
 }
 
-// ────────────────────────────────────────────────────────────────────────────
-// Thread 2: Linux Kernel inotify File Monitor
-// ────────────────────────────────────────────────────────────────────────────
-// Events we care about:
-//   IN_DELETE       a file/dir inside the watched dir was deleted  -> DELETED
-//   IN_MOVED_FROM   something was moved/renamed away               -> MOVED_OUT or RENAMED
-//   IN_MOVED_TO     something arrived (used to detect renames)
-//   IN_DELETE_SELF / IN_MOVE_SELF  the watched dir itself vanished -> WATCH_DIR_REMOVED
-//   IN_Q_OVERFLOW   kernel queue overflowed, some events were lost -> QUEUE_OVERFLOW
-//
-// RENAME DETECTION: a rename inside the same folder produces IN_MOVED_FROM
-// followed by IN_MOVED_TO with the SAME `cookie` number. A move out of the
-// folder produces only IN_MOVED_FROM. So we hold each MOVED_FROM for a short
-// time; if a matching MOVED_TO shows up it was a rename, otherwise a move-out.
-// ────────────────────────────────────────────────────────────────────────────
+// thread 2: linux kernel inotify event listener for file operations
 void inotify_worker(DatabaseManager& db, const std::string& watch_dir) {
     say("[THREAD 2] Inotify thread started. Watching directory: '" + watch_dir + "'");
 
-    // create an inotify instance (returns a file descriptor)
-    int inotify_fd = inotify_init1(IN_NONBLOCK | IN_CLOEXEC);  // non-blocking so reads don't hang forever
+    // create inotify file descriptor with non-blocking mode
+    int inotify_fd = inotify_init1(IN_NONBLOCK | IN_CLOEXEC);
     if (inotify_fd < 0) {
         say(std::string("[INOTIFY ERROR] Failed to initialize inotify: ") + std::strerror(errno), true);
         return;
@@ -355,7 +309,7 @@ void inotify_worker(DatabaseManager& db, const std::string& watch_dir) {
     int watch_desc = -1;
     auto last_rewatch_try = std::chrono::steady_clock::time_point{};
 
-    // (re)arms the watch; recreates the directory if someone deleted it
+    // helper to recreate directory and arm inotify watch mask
     auto arm_watch = [&]() {
         std::error_code ec;
         fs::create_directories(watch_dir, ec);
@@ -370,13 +324,15 @@ void inotify_worker(DatabaseManager& db, const std::string& watch_dir) {
         return;
     }
 
+    // temporary buffer for pending move events to distinguish rename from move-out
     struct PendingMove {
         std::string name;
         bool is_dir;
         std::chrono::steady_clock::time_point when;
     };
-    std::unordered_map<uint32_t, PendingMove> pending_moves;   // cookie -> MOVED_FROM waiting for a MOVED_TO
+    std::unordered_map<uint32_t, PendingMove> pending_moves;
 
+    // helper to persist audit record and log alert to console
     auto record = [&](const std::string& name, const char* type, bool is_dir, const std::string& new_name = {}) {
         db.log_file_event(name, type, is_dir, new_name);
         std::string what = std::string(is_dir ? "directory" : "file") + " '" + name + "'";
@@ -385,34 +341,33 @@ void inotify_worker(DatabaseManager& db, const std::string& watch_dir) {
     };
 
     constexpr size_t BUF_LEN = 4096;
-    // buffer to hold inotify events; aligned for proper struct access
+    // buffer sized for reading batched inotify events
     alignas(struct inotify_event) char buffer[BUF_LEN];
 
-    // set up poll() to wait for events on the inotify file descriptor
+    // poll inotify file descriptor with a short timeout
     struct pollfd pfd;
     pfd.fd = inotify_fd;
-    pfd.events = POLLIN;  // we want to know when there's data to read
+    pfd.events = POLLIN;
 
     while (g_running.load()) {
-        // if the watched directory disappeared, try to recreate + re-watch it once a second
+        // if watched directory vanished, try to recreate and re-arm watch
         if (watch_desc < 0 && std::chrono::steady_clock::now() - last_rewatch_try >= 1s) {
             last_rewatch_try = std::chrono::steady_clock::now();
             if (arm_watch()) say("[INOTIFY] Watch re-armed on '" + watch_dir + "'");
         }
 
-        // wait up to 200ms for an event (then loop back to check g_running)
+        // wait up to 200ms for event or timeout to check g_running
         int ret = poll(&pfd, 1, 200);
         if (ret < 0) {
-            if (errno == EINTR) continue;  // signal interrupted us, just retry
+            if (errno == EINTR) continue;  // signal interrupted us, retry
             say(std::string("[INOTIFY ERROR] poll failed: ") + std::strerror(errno), true);
             break;
         }
 
-        if (ret > 0 && (pfd.revents & POLLIN)) {  // there are events to read
-            // drain everything available (the fd is non-blocking, read() returns -1/EAGAIN when empty)
+        if (ret > 0 && (pfd.revents & POLLIN)) {
+            // process all events queued in the inotify buffer
             ssize_t num_read;
             while ((num_read = read(inotify_fd, buffer, BUF_LEN)) > 0) {
-                // parse one or more events from the buffer
                 ssize_t offset = 0;
                 while (offset < num_read) {
                     auto* event = reinterpret_cast<struct inotify_event*>(&buffer[offset]);
@@ -420,34 +375,38 @@ void inotify_worker(DatabaseManager& db, const std::string& watch_dir) {
                     bool is_dir = (event->mask & IN_ISDIR) != 0;
 
                     if (event->mask & IN_Q_OVERFLOW) {
+                        // kernel queue overflowed, some events were dropped
                         record("*", "QUEUE_OVERFLOW", false);
                     } else if (event->mask & IN_DELETE) {
+                        // file or directory deleted inside watched folder
                         record(name, "DELETED", is_dir);
                     } else if (event->mask & IN_MOVED_FROM) {
+                        // file moved away, record pending move to see if matching IN_MOVED_TO arrives
                         pending_moves[event->cookie] = {name, is_dir, std::chrono::steady_clock::now()};
                     } else if (event->mask & IN_MOVED_TO) {
+                        // file arrived, if cookie matches pending move then it was a rename
                         auto it = pending_moves.find(event->cookie);
-                        if (it != pending_moves.end()) {          // same cookie = rename inside the folder
+                        if (it != pending_moves.end()) {
                             record(it->second.name, "RENAMED", is_dir, name);
                             pending_moves.erase(it);
-                        }                                          // else: a file moved IN — not a forensic event
+                        }
                     } else if (event->mask & (IN_DELETE_SELF | IN_MOVE_SELF)) {
+                        // watched folder itself was removed or moved away
                         if (event->wd == watch_desc) {
                             record(watch_dir, "WATCH_DIR_REMOVED", true);
-                            inotify_rm_watch(inotify_fd, watch_desc);  // MOVE_SELF keeps watching the moved dir otherwise
+                            inotify_rm_watch(inotify_fd, watch_desc);
                             watch_desc = -1;
                         }
                     } else if (event->mask & IN_IGNORED) {
-                        if (event->wd == watch_desc) watch_desc = -1;  // kernel removed our watch
+                        if (event->wd == watch_desc) watch_desc = -1;
                     }
 
-                    // move to next event in buffer (events are variable-length)
                     offset += static_cast<ssize_t>(sizeof(struct inotify_event) + event->len);
                 }
             }
         }
 
-        // MOVED_FROM events with no matching MOVED_TO after 300ms were moved OUT of the folder
+        // pending moves that received no matching destination within timeout are moves out
         auto now = std::chrono::steady_clock::now();
         for (auto it = pending_moves.begin(); it != pending_moves.end();) {
             if (now - it->second.when >= 300ms) {
@@ -459,18 +418,16 @@ void inotify_worker(DatabaseManager& db, const std::string& watch_dir) {
         }
     }
 
-    // anything still pending at shutdown was a move-out
+    // flush any remaining pending moves on shutdown
     for (auto& [cookie, p] : pending_moves) record(p.name, "MOVED_OUT", p.is_dir);
 
-    // cleanup: remove the watch and close the file descriptor
+    // detach watch and close file descriptor
     if (watch_desc >= 0) inotify_rm_watch(inotify_fd, watch_desc);
     close(inotify_fd);
     say("[THREAD 2] Inotify thread exiting.");
 }
 
-// ────────────────────────────────────────────────────────────────────────────
-// Main Application Entrypoint
-// ────────────────────────────────────────────────────────────────────────────
+// daemon entrypoint: parse args, check prior crashes, spawn threads, and wait
 int main(int argc, char** argv) {
     Config cfg;
     if (int rc = parse_args(argc, argv, cfg); rc != 0) {
@@ -483,23 +440,21 @@ int main(int argc, char** argv) {
     std::cout << "║       Operating Systems & Database Management Systems        ║\n";
     std::cout << "╚══════════════════════════════════════════════════════════════╝\n\n";
 
-    // tell the OS to call signal_handler when Ctrl+C or kill is used.
-    // sigaction is the modern, well-defined version of signal(). We leave out
-    // SA_RESTART on purpose so a blocking poll() wakes up with EINTR.
+    // install signal action for graceful shutdown without SA_RESTART so poll wakes up
     struct sigaction sa{};
     sa.sa_handler = signal_handler;
     sigemptyset(&sa.sa_mask);
     sigaction(SIGINT,  &sa, nullptr);
     sigaction(SIGTERM, &sa, nullptr);
 
-    // create the directory we'll monitor for file deletions (if it doesn't exist)
+    // make sure watch folder exists before starting inotify thread
     std::error_code ec;
     if (!fs::exists(cfg.watch_dir, ec)) {
         fs::create_directories(cfg.watch_dir, ec);
         std::cout << "[INIT] Created watch directory: " << cfg.watch_dir << "\n";
     }
 
-    // Initialize DatabaseManager (MySQL with SQLite fallback or specified backend)
+    // initialize database backend based on config
     DatabaseConfig db_cfg;
     db_cfg.backend = (cfg.db_backend == "sqlite") ? BackendType::SQLite : BackendType::MySQL;
     db_cfg.mysql_host = cfg.mysql_host;
@@ -518,7 +473,7 @@ int main(int argc, char** argv) {
     }
     std::cout << "[INIT] Database persistence engine active: " << db.backend_name() << "\n";
 
-    // ── Crash detection ─────────────────────────────────────────────────────
+    // crash forensics: find previous sessions that never cleanly exited
     const std::string host = get_hostname();
     for (const auto& s : db.find_open_sessions()) {
         if (s.hostname == host && s.pid != getpid() && process_is_blackbox(s.pid)) {
@@ -539,34 +494,35 @@ int main(int argc, char** argv) {
     }
     std::cout << "[INIT] Session #" << db.session_id() << " started (pid " << getpid() << ").\n";
 
-    // ── Retention: clean up old rows once at startup (then hourly in thread 1) ──
+    // purge expired vitals once at startup
     if (cfg.retention_days > 0) {
         int n = db.purge_old_vitals(cfg.retention_days);
         if (n > 0) std::cout << "[DBMS] Retention: purged " << n << " vitals rows older than "
                              << cfg.retention_days << " days.\n";
     }
 
-    HardwareSensorReader reader;   // takes the CPU baseline + finds the CPU temp sensor
+    // create sensor reader and log detected temp source
+    HardwareSensorReader reader;
     std::cout << "[INIT] CPU temperature source: " << reader.temp_source() << "\n";
     std::cout << "[INIT] Alerts: CPU >= " << cfg.cpu_alert << "%, RAM >= " << cfg.ram_alert
               << "%, Temp >= " << cfg.temp_alert << "°C (0 = disabled)\n";
     std::cout << "[INIT] Spawning concurrent worker threads...\n";
 
-    // start both threads; std::ref passes references so both share the same objects
-    std::thread sensor_th(sensor_worker, std::ref(db), std::ref(reader), std::cref(cfg));  // thread 1
-    std::thread inotify_th(inotify_worker, std::ref(db), cfg.watch_dir);                   // thread 2
+    // spawn worker threads and wait for termination signal
+    std::thread sensor_th(sensor_worker, std::ref(db), std::ref(reader), std::cref(cfg));
+    std::thread inotify_th(inotify_worker, std::ref(db), cfg.watch_dir);
 
     say("\n[INFO] Daemon running. Press Ctrl+C to terminate cleanly.");
     say("[INFO] Telemetry is being written to " + db.backend_name() + " in real-time.");
     say("[INFO] Run 'make ui' in another terminal to open the web dashboard.\n");
 
-    // join() = wait here until each thread finishes (they finish when g_running becomes false)
+    // wait until threads complete their loops after signal
     if (sensor_th.joinable())  sensor_th.join();
     if (inotify_th.joinable()) inotify_th.join();
 
     std::cout << "[SHUTDOWN] Received signal " << g_signal.load() << ". Closing session...\n";
 
-    // mark this session as cleanly finished, then close the database
+    // cleanly close session record and database handles before exit
     db.end_session();
     db.close();
 

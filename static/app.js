@@ -1,9 +1,6 @@
-/**
- * app.js — System Blackbox Web Telemetry Client
- * Connects to REST endpoints (/api/metrics, /api/deletions, /api/alerts, /api/sessions, /api/history).
- */
+// frontend client for system blackbox dashboard
 
-// DOM Elements
+// dom references for gauges, tables, and badge elements
 const elCpuVal = document.getElementById('cpuVal');
 const elCpuBar = document.getElementById('cpuBar');
 
@@ -30,7 +27,7 @@ const elAlertCount = document.getElementById('alertCount');
 const elSessionsBody = document.getElementById('sessionsTableBody');
 const elSessionCount = document.getElementById('sessionCount');
 
-// Tab Switching
+// toggles visible panel between files, alerts, and sessions
 function switchTab(tab) {
   const tabs = ['files', 'alerts', 'sessions'];
   tabs.forEach(t => {
@@ -48,11 +45,12 @@ function switchTab(tab) {
   });
 }
 
+// helper to uppercase first character for element ids
 function capitalize(s) {
   return s.charAt(0).toUpperCase() + s.slice(1);
 }
 
-// Sparkline Canvas Renderer
+// renders mini time-series line chart onto canvas
 function drawSparkline(canvasId, data, maxVal, strokeColor, fillColor) {
   const canvas = document.getElementById(canvasId);
   if (!canvas || !data || data.length < 2) return;
@@ -66,19 +64,18 @@ function drawSparkline(canvasId, data, maxVal, strokeColor, fillColor) {
   const clamp = (v) => Math.max(0, Math.min(maxVal, v));
   const getY = (v) => h - (clamp(v) / maxVal) * (h - 6) - 3;
 
-  // Path
+  // stroke line path
   ctx.beginPath();
   ctx.moveTo(0, getY(data[0]));
   for (let i = 1; i < data.length; i++) {
     ctx.lineTo(i * step, getY(data[i]));
   }
 
-  // Stroke
   ctx.strokeStyle = strokeColor;
   ctx.lineWidth = 1.8;
   ctx.stroke();
 
-  // Gradient area fill
+  // gradient area fill under the line
   ctx.lineTo((data.length - 1) * step, h);
   ctx.lineTo(0, h);
   ctx.closePath();
@@ -86,14 +83,14 @@ function drawSparkline(canvasId, data, maxVal, strokeColor, fillColor) {
   ctx.fill();
 }
 
-// 1. Fetch Metrics (1s interval)
+// fetches live telemetry every second and updates gauges and status badge
 async function updateVitals() {
   try {
     const res = await fetch('/api/metrics', { cache: 'no-store' });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const data = await res.json();
 
-    // Engine Status
+    // engine status indicator
     if (data.cpp_engine_active) {
       elEngineBadge.className = 'status-badge';
       let sessionNote = data.session_id ? ` (Session #${data.session_id})` : '';
@@ -113,24 +110,24 @@ async function updateVitals() {
       elLivePulse.style.display = 'none';
     }
 
-    // CPU Card
+    // cpu card
     elCpuVal.textContent = `${Number(data.cpu_usage).toFixed(1)}%`;
     elCpuBar.style.width = `${Math.min(100, Math.max(0, data.cpu_usage))}%`;
 
-    // RAM Card
+    // ram card
     elRamVal.textContent = `${Number(data.ram_usage).toFixed(1)}%`;
     elRamBar.style.width = `${Math.min(100, Math.max(0, data.ram_usage))}%`;
 
-    // Temp Card
+    // temp card
     elTempVal.textContent = `${Number(data.cpu_temp).toFixed(1)} °C`;
     elTempBar.style.width = `${Math.min(100, Math.max(0, (data.cpu_temp / 100) * 100))}%`;
 
-    // Fan Card
+    // fan card
     const fan = Number(data.fan_speed) || 0;
     elFanVal.textContent = fan > 0 ? `${fan.toLocaleString()} RPM` : '0 RPM';
     elFanBar.style.width = `${Math.min(100, Math.max(0, (fan / 5500) * 100))}%`;
 
-    // Timestamp
+    // timestamp text
     if (data.timestamp) {
       elLastUpdated.textContent = data.timestamp;
     }
@@ -141,7 +138,7 @@ async function updateVitals() {
   }
 }
 
-// 2. Fetch File Deletion Events (2s interval)
+// polls file audit log and redraws table rows
 async function updateDeletions() {
   try {
     const res = await fetch('/api/deletions', { cache: 'no-store' });
@@ -189,7 +186,7 @@ async function updateDeletions() {
   }
 }
 
-// 3. Fetch Alerts (3s interval)
+// pulls recent threshold breaches and displays active alert count
 async function updateAlerts() {
   try {
     const res = await fetch('/api/alerts', { cache: 'no-store' });
@@ -228,7 +225,7 @@ async function updateAlerts() {
   }
 }
 
-// 4. Fetch Sessions (5s interval)
+// updates session log and checks for unexpected crashes
 async function updateSessions() {
   try {
     const res = await fetch('/api/sessions', { cache: 'no-store' });
@@ -273,7 +270,7 @@ async function updateSessions() {
   }
 }
 
-// 5. Fetch History for Sparklines (3s interval)
+// fetches historical vitals and repaints sparkline canvas charts
 async function updateHistory() {
   try {
     const res = await fetch('/api/history?minutes=15', { cache: 'no-store' });
@@ -291,6 +288,7 @@ async function updateHistory() {
   }
 }
 
+// sanitizes untrusted text before injecting into table cells
 function escapeHtml(text) {
   if (!text) return '';
   const div = document.createElement('div');
@@ -298,14 +296,14 @@ function escapeHtml(text) {
   return div.innerHTML;
 }
 
-// Initial Run
+// initial data fetch on page load
 updateVitals();
 updateDeletions();
 updateAlerts();
 updateSessions();
 updateHistory();
 
-// Periodic intervals
+// periodic polling timers
 setInterval(updateVitals, 1000);
 setInterval(updateDeletions, 2000);
 setInterval(updateAlerts, 3000);
