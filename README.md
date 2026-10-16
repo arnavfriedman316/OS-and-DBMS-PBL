@@ -1,6 +1,6 @@
 # System Blackbox — OS Telemetry & Forensic Kernel Auditor
 
-A Project-Based Learning (PBL) system integrating low-level **Operating Systems** concepts with **Database Management Systems (DBMS)** architecture.
+An integrated systems telemetry and forensic auditor combining low-level Linux systems programming with high-throughput relational database architecture.
 
 ---
 
@@ -42,7 +42,7 @@ A Project-Based Learning (PBL) system integrating low-level **Operating Systems*
 
 ---
 
-## Academic Concepts Demonstrated
+## Core Architecture & Engineering Highlights
 
 ### Operating Systems (OS)
 * **Linux Virtual Filesystems (`/proc` & `/sys`)**: Parsing tick counters from `/proc/stat`, virtual memory accounting from `/proc/meminfo`, and hardware drivers (Intel `coretemp` / AMD `k10temp`) via `/sys/class/hwmon`.
@@ -63,9 +63,6 @@ A Project-Based Learning (PBL) system integrating low-level **Operating Systems*
 ## Repository Structure
 
 ```
-├── DATABASE.md         # Dedicated DBMS guide, table schemas, permissions & queries
-├── DOCUMENTATION.md    # Complete PBL submission documentation & viva guide
-├── operatingsystem.md  # Dedicated OS guide, /proc, /sys, inotify, multithreading & signals
 ├── blackbox.conf       # Database credentials, ports, intervals, and thresholds
 ├── Makefile            # Build orchestration (auto-deps, MySQL & SQLite flags, setup-db)
 ├── alerts.hpp          # Threshold alert monitor with sustain & hysteresis
@@ -140,13 +137,13 @@ Open your browser at: **`http://localhost:8080`**
 
 ---
 
-## Project Milestones & Roadmap
+## Features & Engineering Roadmap
 
-- [x] **Milestone 1: Database Engine & MySQL Integration (Phase 1 & 2 - 50% Complete)**
-- [x] **Milestone 2: Low-Level Virtual Filesystem Readers & Coretemp Sensors (Phase 2 - 50% Complete)**
-- [x] **Milestone 3: Kernel Inotify File & Directory Auditing (Phase 2 - 50% Complete)**
-- [x] **Milestone 4: Crash Detection via Session Lifecycle (Phase 2 - 50% Complete)**
-- [x] **Milestone 5: Hysteresis Threshold Alert Engine & Data Retention (Phase 2 - 50% Complete)**
-- [ ] **Milestone 6: Per-Process Snapshotting at Alert Trigger Time (`/proc/[pid]/stat`) (Phase 3 - 75%)**
-- [ ] **Milestone 7: Recursive Directory Watch Tree (Phase 3 - 75%)**
-- [ ] **Milestone 8: Forensic Incident PDF/CSV Export & Systemd Integration (Phase 4 - 100%)**
+- [x] **Dual-Backend Persistence Engine (MySQL / MariaDB + SQLite WAL Fallback)**
+- [x] **Low-Level Virtual Filesystem Readers & Autodetecting Coretemp Sensors**
+- [x] **Kernel Inotify Real-Time File & Directory Auditing**
+- [x] **Crash Detection via Session Lifecycle Forensics**
+- [x] **Hysteresis Threshold Alert Engine & Automated Data Retention**
+- [ ] **Per-Process Snapshotting at Alert Trigger Time (`/proc/[pid]/stat`)**
+- [ ] **Recursive Directory Watch Tree**
+- [ ] **Forensic Incident PDF/CSV Export & Systemd Integration**

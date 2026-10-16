@@ -451,7 +451,7 @@ def run_server(host=DEFAULT_HOST, port=DEFAULT_PORT):
         try:
             server = http.server.ThreadingHTTPServer((host, p), BlackboxHttpHandler)
             print("=" * 64)
-            print("  System Blackbox Web Dashboard (Phase 2 - 50% PBL Milestone)")
+            print("  System Blackbox Web Dashboard")
             print(f"  URL:                    http://localhost:{p}")
             print(f"  Primary Backend:        {CONFIG['db_backend'].upper()}")
             print(f"  MySQL Server:           {CONFIG['mysql_host']}:{CONFIG['mysql_port']}")
