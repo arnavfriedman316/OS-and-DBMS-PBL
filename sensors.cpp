@@ -2,14 +2,15 @@
 
 #include "sensors.hpp"
 
-#include <iostream>     // for error logging
-#include <fstream>      // for reading files
-#include <sstream>      // for parsing string lines
+#include <cstdio>       // for fast low-overhead FILE* reading of pseudo-files
+#include <cstring>      // for std::strncmp
+#include <fstream>      // for reading sysfs files during discovery
 #include <string>
 #include <vector>
 #include <filesystem>   // for scanning directories in sysfs
 #include <algorithm>    // for std::max and std::clamp
 #include <cmath>        // for std::round
+#include <chrono>       // for measuring actual microsecond burst times (t_n) of kernel probes
 
 namespace fs = std::filesystem;  // short alias so we don't have to keep writing std::filesystem
 
@@ -18,14 +19,20 @@ static std::string read_line(const fs::path& p) {
     std::ifstream ifs(p);
     std::string s;
     std::getline(ifs, s);
+    while (!s.empty() && (s.back() == '\r' || s.back() == ' ' || s.back() == '\t')) {
+        s.pop_back();
+    }
     return s;
 }
 
 // sysfs temperature files give values in millidegrees celsius, so divide by 1000
-static double read_millideg(const fs::path& p) {
-    std::ifstream ifs(p);
+static double read_millideg(const std::string& path) {
+    FILE* fp = std::fopen(path.c_str(), "r");
+    if (!fp) return -1.0;
     double val = 0.0;
-    if (!(ifs >> val)) return -1.0;
+    int matched = std::fscanf(fp, "%lf", &val);
+    std::fclose(fp);
+    if (matched != 1) return -1.0;
     double deg = val / 1000.0;
     return (deg > 0.0 && deg < 125.0) ? deg : -1.0;  // filter out bogus readings
 }
@@ -34,36 +41,33 @@ static double read_millideg(const fs::path& p) {
 HardwareSensorReader::HardwareSensorReader() {
     read_proc_stat_ticks(prev_idle_ticks_, prev_total_ticks_);
     detect_cpu_temp_sensor();
+    detect_fan_sensors();
 }
 
 // pull raw jiffies/ticks from /proc/stat for aggregate cpu time
 bool HardwareSensorReader::read_proc_stat_ticks(unsigned long long& idle_ticks, unsigned long long& total_ticks) {
-    std::ifstream stat_file("/proc/stat");  // open the kernel statistics pseudo-file
-    if (!stat_file.is_open()) {
+    FILE* stat_file = std::fopen("/proc/stat", "r");  // open the kernel statistics pseudo-file
+    if (!stat_file) {
         return false;
     }
 
-    std::string line;
-    if (std::getline(stat_file, line)) {  // grab the first line which has aggregate cpu ticks
-        std::istringstream iss(line);
-        std::string cpu_label;
-        iss >> cpu_label;
+    char line[512];
+    bool ok = false;
+    if (std::fgets(line, sizeof(line), stat_file)) {  // grab the first line which has aggregate cpu ticks
+        // parse the 8 primary tick counters reported by the linux kernel
+        // (guest and guest_nice are omitted because they are already included in user/nice by the kernel)
+        unsigned long long user = 0, nice = 0, system = 0, idle = 0;
+        unsigned long long iowait = 0, irq = 0, softirq = 0, steal = 0;
 
-        if (cpu_label == "cpu") {
-            // parse all 10 tick counters reported by the linux kernel
-            unsigned long long user = 0, nice = 0, system = 0, idle = 0;
-            unsigned long long iowait = 0, irq = 0, softirq = 0, steal = 0;
-            unsigned long long guest = 0, guest_nice = 0;
-
-            iss >> user >> nice >> system >> idle >> iowait >> irq >> softirq >> steal >> guest >> guest_nice;
-
-            idle_ticks = idle + iowait;  // idle ticks include regular idle and iowait time
-            // sum up tick counters; guest time is already included in user/nice by the kernel
+        if (std::sscanf(line, "cpu %llu %llu %llu %llu %llu %llu %llu %llu",
+                        &user, &nice, &system, &idle, &iowait, &irq, &softirq, &steal) >= 4) {
+            idle_ticks  = idle + iowait;  // idle ticks include regular idle and iowait time
             total_ticks = user + nice + system + idle + iowait + irq + softirq + steal;
-            return true;
+            ok = true;
         }
     }
-    return false;
+    std::fclose(stat_file);
+    return ok;
 }
 
 // calculate cpu utilization percentage by comparing current ticks against our last sample
@@ -75,16 +79,24 @@ double HardwareSensorReader::read_cpu_usage() {
         return 0.0;  // couldn't read /proc/stat, return 0 as safe fallback
     }
 
-    // measure how many ticks passed since the previous read
+    if (current_total <= prev_total_ticks_) {
+        prev_total_ticks_ = current_total;
+        prev_idle_ticks_  = current_idle;
+        return 0.0;  // avoid dividing by zero or unsigned wraparound if called with no elapsed ticks
+    }
+
+    // measure how many ticks passed since the previous read (guarding SMP NOHZ idle counter jitter)
     unsigned long long delta_total = current_total - prev_total_ticks_;
-    unsigned long long delta_idle = current_idle - prev_idle_ticks_;
+    unsigned long long delta_idle  = (current_idle >= prev_idle_ticks_)
+                                   ? (current_idle - prev_idle_ticks_)
+                                   : 0ULL;
 
     // update baseline for next cycle
     prev_total_ticks_ = current_total;
-    prev_idle_ticks_ = current_idle;
+    prev_idle_ticks_  = current_idle;
 
-    if (delta_total == 0) {
-        return 0.0;  // avoid dividing by zero if called too quickly with no elapsed ticks
+    if (delta_idle >= delta_total) {
+        return 0.0;
     }
 
     // time working divided by total time gives percentage
@@ -95,8 +107,8 @@ double HardwareSensorReader::read_cpu_usage() {
 
 // calculate memory usage percentage by parsing /proc/meminfo
 double HardwareSensorReader::read_ram_usage() {
-    std::ifstream meminfo_file("/proc/meminfo");
-    if (!meminfo_file.is_open()) {
+    FILE* meminfo_file = std::fopen("/proc/meminfo", "r");
+    if (!meminfo_file) {
         return 0.0;
     }
 
@@ -105,39 +117,40 @@ double HardwareSensorReader::read_ram_usage() {
     unsigned long long mem_free = 0;
     unsigned long long buffers = 0;
     unsigned long long cached = 0;
-    std::string line;
+    bool saw_mem_available = false;
+    char line[256];
 
-    // parse line by line to locate total and available memory fields
-    while (std::getline(meminfo_file, line)) {
-        std::istringstream iss(line);
-        std::string key;
-        unsigned long long value;
-        iss >> key >> value;
-
-        if (key == "MemTotal:") {
-            mem_total = value;
-        } else if (key == "MemAvailable:") {
-            mem_available = value;  // accounts for reclaimable cache, most accurate metric
-        } else if (key == "MemFree:") {
-            mem_free = value;
-        } else if (key == "Buffers:") {
-            buffers = value;
-        } else if (key == "Cached:") {
-            cached = value;
+    // parse line by line using stack buffer to locate total and available memory fields
+    while (std::fgets(line, sizeof(line), meminfo_file)) {
+        unsigned long long val = 0;
+        if (std::strncmp(line, "MemTotal:", 9) == 0) {
+            if (std::sscanf(line + 9, "%llu", &val) == 1) mem_total = val;
+        } else if (std::strncmp(line, "MemAvailable:", 13) == 0) {
+            if (std::sscanf(line + 13, "%llu", &val) == 1) {
+                mem_available = val;  // accounts for reclaimable cache, most accurate metric
+                saw_mem_available = true;
+            }
+        } else if (std::strncmp(line, "MemFree:", 8) == 0) {
+            if (std::sscanf(line + 8, "%llu", &val) == 1) mem_free = val;
+        } else if (std::strncmp(line, "Buffers:", 8) == 0) {
+            if (std::sscanf(line + 8, "%llu", &val) == 1) buffers = val;
+        } else if (std::strncmp(line, "Cached:", 7) == 0) {
+            if (std::sscanf(line + 7, "%llu", &val) == 1) cached = val;
         }
 
-        if (mem_total > 0 && mem_available > 0) {
+        if (mem_total > 0 && saw_mem_available) {
             break;  // once we have both total and available memory we can stop reading
         }
     }
+    std::fclose(meminfo_file);
 
     // fallback for ancient kernels without MemAvailable
-    if (mem_available == 0 && (mem_free > 0 || buffers > 0 || cached > 0)) {
+    if (!saw_mem_available && (mem_free > 0 || buffers > 0 || cached > 0)) {
         mem_available = mem_free + buffers + cached;
     }
 
-    if (mem_total == 0) {
-        return 0.0;  // sanity check against division by zero
+    if (mem_total == 0 || mem_available >= mem_total) {
+        return 0.0;  // sanity check against division by zero or unsigned underflow
     }
 
     // compute used percentage, round to one decimal place, and clamp
@@ -149,8 +162,8 @@ double HardwareSensorReader::read_ram_usage() {
 // find the specific thermal sensor monitoring the cpu instead of wifi/gpu/nvme
 void HardwareSensorReader::detect_cpu_temp_sensor() {
     std::error_code ec;
-    const std::vector<std::string> cpu_drivers  = {"coretemp", "k10temp", "zenpower", "cpu_thermal"};
-    const std::vector<std::string> pkg_labels   = {"Package id 0", "Tctl", "Tdie"};
+    const std::vector<std::string> cpu_drivers = {"coretemp", "k10temp", "zenpower", "zenergy", "cpu_thermal"};
+    const std::vector<std::string> pkg_labels  = {"Package id 0", "Tctl", "Tdie", "CPU"};
 
     // 1. check hwmon drivers for known cpu thermal module names in cpu_drivers
     for (const auto& entry : fs::directory_iterator("/sys/class/hwmon", ec)) {
@@ -190,6 +203,58 @@ void HardwareSensorReader::detect_cpu_temp_sensor() {
 
     // 3. no direct cpu sensor matched, fallback to hottest sensor in system
     temp_source_ = "fallback: hottest sensor";
+    detect_fallback_temp_sensors();
+}
+
+// discover and cache cooling fan sysfs inputs once at startup to avoid per-tick directory scans
+void HardwareSensorReader::detect_fan_sensors() {
+    fan_paths_.clear();
+    std::error_code ec;
+    for (const auto& entry : fs::directory_iterator("/sys/class/hwmon", ec)) {
+        for (const auto& file : fs::directory_iterator(entry.path(), ec)) {
+            std::string fname = file.path().filename().string();
+            if (fname.rfind("fan", 0) == 0 && fname.ends_with("_input")) {
+                fan_paths_.push_back(file.path().string());
+            }
+        }
+    }
+}
+
+// discover fallback thermal inputs once, skipping slow wireless or sleeping dgpu sensors when possible
+void HardwareSensorReader::detect_fallback_temp_sensors() {
+    if (fallback_temps_probed_) return;
+    fallback_temps_probed_ = true;
+    fallback_temp_paths_.clear();
+
+    std::error_code ec;
+    std::vector<std::string> deferred_slow;
+
+    for (const auto& entry : fs::directory_iterator("/sys/class/hwmon", ec)) {
+        std::string drv = read_line(entry.path() / "name");
+        // iwlwifi / nouveau / amdgpu PCIe reads can stall 15ms-500ms waking hardware
+        bool is_slow_peripheral = (drv.rfind("iwlwifi", 0) == 0 || drv == "nouveau" || drv == "amdgpu");
+        for (const auto& file : fs::directory_iterator(entry.path(), ec)) {
+            std::string fname = file.path().filename().string();
+            if (fname.rfind("temp", 0) == 0 && fname.ends_with("_input")) {
+                if (is_slow_peripheral) {
+                    deferred_slow.push_back(file.path().string());
+                } else {
+                    fallback_temp_paths_.push_back(file.path().string());
+                }
+            }
+        }
+    }
+    for (const auto& entry : fs::directory_iterator("/sys/class/thermal", ec)) {
+        if (entry.path().filename().string().rfind("thermal_zone", 0) == 0) {
+            fs::path tp = entry.path() / "temp";
+            if (fs::exists(tp, ec)) {
+                fallback_temp_paths_.push_back(tp.string());
+            }
+        }
+    }
+    if (fallback_temp_paths_.empty()) {
+        fallback_temp_paths_ = std::move(deferred_slow);
+    }
 }
 
 // read cpu temperature in degrees celsius from the detected sensor path
@@ -201,56 +266,109 @@ double HardwareSensorReader::read_cpu_temp() {
     return read_max_any_temp();  // if sensor reading fails or path is missing, fall back
 }
 
-// fallback scan: check every temperature input across all hwmon and thermal zones
+// fallback scan: check cached temperature inputs without walking directories every second
 double HardwareSensorReader::read_max_any_temp() {
-    double max_temp = 0.0;
-    std::error_code ec;
-
-    // scan hwmon devices for any temp*_input files
-    for (const auto& entry : fs::directory_iterator("/sys/class/hwmon", ec)) {
-        for (const auto& file : fs::directory_iterator(entry.path(), ec)) {
-            std::string fname = file.path().filename().string();
-            if (fname.rfind("temp", 0) == 0 && fname.ends_with("_input")) {
-                max_temp = std::max(max_temp, read_millideg(file.path()));
-            }
-        }
+    if (!fallback_temps_probed_) {
+        detect_fallback_temp_sensors();
     }
-    // check generic acpi thermal zones
-    for (const auto& entry : fs::directory_iterator("/sys/class/thermal", ec)) {
-        if (entry.path().filename().string().rfind("thermal_zone", 0) == 0) {
-            max_temp = std::max(max_temp, read_millideg(entry.path() / "temp"));
-        }
+    double max_temp = 0.0;
+    for (const auto& path : fallback_temp_paths_) {
+        max_temp = std::max(max_temp, read_millideg(path));
     }
     return std::round(max_temp * 10.0) / 10.0;
 }
 
-// scan hwmon for cooling fan speeds and return the highest rpm
+// read cached cooling fan speed inputs and return the highest rpm
 int HardwareSensorReader::read_fan_speed() {
-    std::error_code ec;
     int max_rpm = 0;
 
     // laptops often have two fans where one might be idle at 0 rpm, so pick the fastest one
-    for (const auto& entry : fs::directory_iterator("/sys/class/hwmon", ec)) {
-        for (const auto& file : fs::directory_iterator(entry.path(), ec)) {
-            std::string fname = file.path().filename().string();
-            if (fname.rfind("fan", 0) == 0 && fname.ends_with("_input")) {
-                std::ifstream ifs(file.path());
-                int rpm = 0;
-                if (ifs >> rpm && rpm > max_rpm) {
-                    max_rpm = rpm;
-                }
-            }
+    for (const auto& path : fan_paths_) {
+        FILE* fp = std::fopen(path.c_str(), "r");
+        if (!fp) continue;
+        int rpm = 0;
+        if (std::fscanf(fp, "%d", &rpm) == 1 && rpm > max_rpm) {
+            max_rpm = rpm;
         }
+        std::fclose(fp);
     }
     return max_rpm;
 }
 
-// read all hardware vitals and pack them into a SystemVitals struct
+// build the 4 kernel telemetry probe tasks (PCBs) with staggered arrival times
+// (0, 2, 4, 6 us) and exponentially-averaged predicted burst times (tau_n)
+std::vector<SchedTask> HardwareSensorReader::build_probe_tasks(SystemVitals* out) {
+    std::vector<SchedTask> tasks;
+    tasks.reserve(4);
+
+    tasks.push_back(SchedTask{
+        1, "CPU_STAT (/proc/stat)",
+        0, std::max(1, predicted_burst_us_[0]), 0,
+        -1, 0, 0, 0, 0,
+        out ? std::function<void()>([this, out]() {
+            out->cpu_usage = read_cpu_usage();
+        }) : std::function<void()>{}
+    });
+
+    tasks.push_back(SchedTask{
+        2, "RAM_INFO (/proc/meminfo)",
+        2, std::max(1, predicted_burst_us_[1]), 0,
+        -1, 0, 0, 0, 0,
+        out ? std::function<void()>([this, out]() {
+            out->ram_usage = read_ram_usage();
+        }) : std::function<void()>{}
+    });
+
+    tasks.push_back(SchedTask{
+        3, "THERMAL_SYS (/sys/hwmon)",
+        4, std::max(1, predicted_burst_us_[2]), 0,
+        -1, 0, 0, 0, 0,
+        out ? std::function<void()>([this, out]() {
+            out->cpu_temp = read_cpu_temp();
+        }) : std::function<void()>{}
+    });
+
+    tasks.push_back(SchedTask{
+        4, "FAN_HWMON (/sys/hwmon)",
+        6, std::max(1, predicted_burst_us_[3]), 0,
+        -1, 0, 0, 0, 0,
+        out ? std::function<void()>([this, out]() {
+            out->fan_speed = read_fan_speed();
+        }) : std::function<void()>{}
+    });
+
+    return tasks;
+}
+
+// read all hardware vitals by scheduling the 4 kernel probes via OsTaskScheduler
+// (SRTF by default, or FCFS / SJF / Round Robin) and updating each probe's
+// predicted burst time via textbook exponential averaging:
+//   tau_{n+1} = alpha * t_n + (1 - alpha) * tau_n
 SystemVitals HardwareSensorReader::read_all() {
     SystemVitals v;
-    v.cpu_usage = read_cpu_usage();
-    v.ram_usage = read_ram_usage();
-    v.cpu_temp  = read_cpu_temp();
-    v.fan_speed = read_fan_speed();
+    auto tasks = build_probe_tasks(&v);
+
+    // compute schedule using configured OS CPU scheduling algorithm
+    last_schedule_ = scheduler_.schedule(tasks);
+
+    // dispatch kernel probes in scheduler-selected order and measure actual burst t_n
+    for (size_t idx : last_schedule_.dispatch_order) {
+        if (idx >= tasks.size() || !tasks[idx].work) continue;
+
+        auto t0 = std::chrono::steady_clock::now();
+        tasks[idx].work();
+        auto t1 = std::chrono::steady_clock::now();
+
+        int actual_us = static_cast<int>(
+            std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count()
+        );
+        // clamp microsecond reading to [2, 200] us to guard against OS preemption outliers
+        actual_us = std::clamp(actual_us, 2, 200);
+
+        predicted_burst_us_[idx] = scheduler_.predict_next_burst(
+            predicted_burst_us_[idx], actual_us
+        );
+    }
+
     return v;
 }

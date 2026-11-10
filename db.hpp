@@ -39,6 +39,14 @@ struct SessionInfo {
     std::string hostname;
 };
 
+// single filesystem audit event collected by inotify
+struct FileEvent {
+    std::string file_name;
+    std::string event_type;
+    bool        is_dir{false};
+    std::string new_name;
+};
+
 // thread-safe wrapper around database operations protected by a mutex
 class DatabaseManager {
 public:
@@ -79,6 +87,9 @@ public:
     bool log_file_event(std::string_view file_name, std::string_view event_type,
                         bool is_dir = false, std::string_view new_name = {});
 
+    // batch insert multiple filesystem audit entries in a single transaction / multi-row insert
+    bool log_file_events_batch(const std::vector<FileEvent>& events);
+
     // backward compatible wrapper for file deletions
     bool log_deleted_file(std::string_view file_name);
 
@@ -117,6 +128,8 @@ private:
     bool prepare_sqlite_stmt(const char* sql, sqlite3_stmt** out);
     void finalize_sqlite_statements();
 
+    // execute mysql query with automatic ping/reconnect retry on transient connection drop
+    bool exec_mysql_query(const char* sql, unsigned long len = 0);
     // escape strings to stop sql injection attacks
     std::string escape_mysql(std::string_view s);
     // format local time string yyyy-mm-dd hh:mm:ss

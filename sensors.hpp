@@ -1,6 +1,10 @@
 #pragma once
 
+#include "scheduler.hpp"
+
+#include <array>
 #include <string>
+#include <vector>
 
 // header for pulling cpu, ram, temp, and fan stats out of /proc and /sys
 
@@ -19,6 +23,7 @@ public:
     HardwareSensorReader();
 
     // pulls all four metrics at once and returns a SystemVitals struct
+    // (dispatched via the OS CPU Task Scheduler: SRTF / FCFS / SJF / RR)
     SystemVitals read_all();
 
     // parses /proc/stat deltas to compute current cpu utilization
@@ -36,6 +41,15 @@ public:
     // name or path of the sensor we ended up using for temperature
     const std::string& temp_source() const { return temp_source_; }
 
+    // configure or inspect the active OS CPU scheduling algorithm (default: SRTF)
+    void set_sched_policy(SchedPolicy policy) { scheduler_.set_policy(policy); }
+    SchedPolicy sched_policy() const { return scheduler_.policy(); }
+    const ScheduleResult& last_schedule() const { return last_schedule_; }
+
+    // build the 4 kernel telemetry probe tasks (PCBs) with current exponentially
+    // averaged burst predictions (tau_n) for scheduling or side-by-side comparison
+    std::vector<SchedTask> build_probe_tasks(SystemVitals* out = nullptr);
+
 private:
     unsigned long long prev_idle_ticks_{0};   // saved idle ticks from last read for calculating delta
     unsigned long long prev_total_ticks_{0};  // saved total ticks from last read for calculating delta
@@ -43,12 +57,31 @@ private:
     std::string temp_path_;    // sysfs path to read cpu temperature from
     std::string temp_source_;  // human readable name of the selected temperature sensor
 
+    std::vector<std::string> fan_paths_;            // cached hwmon fan*_input paths discovered at startup
+    std::vector<std::string> fallback_temp_paths_;  // cached thermal paths if primary cpu sensor is absent
+    bool fallback_temps_probed_{false};
+
+    // OS CPU Task Scheduler (SRTF by default) & exponential burst predictions (in us):
+    //   [0] CPU_STAT (/proc/stat)
+    //   [1] RAM_MEMINFO (/proc/meminfo)
+    //   [2] THERMAL_SYS (/sys/hwmon)
+    //   [3] FAN_HWMON (/sys/hwmon)
+    OsTaskScheduler    scheduler_{SchedPolicy::SRTF, 4, 0.5};
+    std::array<int, 4> predicted_burst_us_{{20, 26, 12, 8}};
+    ScheduleResult     last_schedule_;
+
     // helper to parse raw tick counters out of /proc/stat
     bool read_proc_stat_ticks(unsigned long long& idle_ticks, unsigned long long& total_ticks);
 
     // probe sysfs and thermal zones to find the actual cpu temperature sensor
     void detect_cpu_temp_sensor();
 
-    // fallback that scans every thermal zone and picks the hottest reading
+    // probe sysfs once at startup to cache cooling fan sensor file paths
+    void detect_fan_sensors();
+
+    // cache fallback temperature inputs once so fallback mode avoids per-tick directory scans
+    void detect_fallback_temp_sensors();
+
+    // fallback that checks cached thermal sensors and picks the hottest reading
     double read_max_any_temp();
 };

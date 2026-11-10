@@ -3,7 +3,9 @@
 #include "db.hpp"
 
 #include <iostream>
-#include <sstream>
+#include <cstdio>
+#include <cstring>
+#include <filesystem>
 #include <chrono>
 #include <ctime>
 
@@ -34,6 +36,19 @@ std::string DatabaseManager::escape_mysql(std::string_view s) {
     unsigned long len = mysql_real_escape_string(mysql_handle_, out.data(), s.data(), s.size());
     out.resize(len);
     return out;
+}
+
+// executes a mysql query and retries once after mysql_ping if the server dropped idle connection
+bool DatabaseManager::exec_mysql_query(const char* sql, unsigned long len) {
+    if (!mysql_handle_) return false;
+    if (len == 0) len = static_cast<unsigned long>(std::strlen(sql));
+    if (mysql_real_query(mysql_handle_, sql, len) == 0) {
+        return true;
+    }
+    if (mysql_ping(mysql_handle_) == 0) {
+        return mysql_real_query(mysql_handle_, sql, len) == 0;
+    }
+    return false;
 }
 
 // pick active backend based on DatabaseConfig, with graceful fallback to sqlite if mysql is down
@@ -85,19 +100,35 @@ bool DatabaseManager::init_mysql(const DatabaseConfig& cfg) {
     bool reconnect = true;
     mysql_options(mysql_handle_, MYSQL_OPT_RECONNECT, &reconnect);
 
-    const char* socket = cfg.mysql_socket.empty() ? nullptr : cfg.mysql_socket.c_str();
+    std::error_code ec;
+    const bool has_socket = !cfg.mysql_socket.empty() && std::filesystem::exists(cfg.mysql_socket, ec);
+    const char* socket = has_socket ? cfg.mysql_socket.c_str() : nullptr;
 
     std::cout << "[DBMS] Connecting to MySQL server at " << cfg.mysql_host << ":"
               << cfg.mysql_port << " (user: " << cfg.mysql_user << ", db: " << cfg.mysql_db << ")...\n";
 
-    if (!mysql_real_connect(mysql_handle_,
-                            cfg.mysql_host.c_str(),
-                            cfg.mysql_user.c_str(),
-                            cfg.mysql_pass.c_str(),
-                            cfg.mysql_db.c_str(),
-                            cfg.mysql_port,
-                            socket,
-                            CLIENT_MULTI_STATEMENTS)) {
+    bool connected = (mysql_real_connect(mysql_handle_,
+                                         cfg.mysql_host.c_str(),
+                                         cfg.mysql_user.c_str(),
+                                         cfg.mysql_pass.c_str(),
+                                         cfg.mysql_db.c_str(),
+                                         cfg.mysql_port,
+                                         socket,
+                                         CLIENT_MULTI_STATEMENTS) != nullptr);
+
+    // if loopback tcp failed but a local unix socket exists, retry over unix domain socket
+    if (!connected && has_socket && cfg.mysql_host != "localhost") {
+        connected = (mysql_real_connect(mysql_handle_,
+                                        "localhost",
+                                        cfg.mysql_user.c_str(),
+                                        cfg.mysql_pass.c_str(),
+                                        cfg.mysql_db.c_str(),
+                                        0,
+                                        socket,
+                                        CLIENT_MULTI_STATEMENTS) != nullptr);
+    }
+
+    if (!connected) {
         std::cerr << "[DBMS WARNING] MySQL connection failed: " << mysql_error(mysql_handle_) << "\n";
         mysql_close(mysql_handle_);
         mysql_handle_ = nullptr;
@@ -119,7 +150,8 @@ bool DatabaseManager::create_mysql_schema() {
             end_time VARCHAR(25) NULL,
             pid INT NOT NULL,
             hostname VARCHAR(255) NULL,
-            clean_exit TINYINT NULL
+            clean_exit TINYINT NULL,
+            INDEX idx_sessions_end (end_time)
         ) ENGINE=InnoDB;
 
         CREATE TABLE IF NOT EXISTS vitals_log (
@@ -155,7 +187,8 @@ bool DatabaseManager::create_mysql_schema() {
             state VARCHAR(32) NOT NULL,
             session_id BIGINT NULL,
             INDEX idx_alerts_ts (timestamp),
-            INDEX idx_alerts_session (session_id)
+            INDEX idx_alerts_session (session_id),
+            INDEX idx_alerts_metric_id (metric, id)
         ) ENGINE=InnoDB;
     )SQL";
 
@@ -296,10 +329,14 @@ bool DatabaseManager::create_sqlite_schema() {
     add_sqlite_column_if_missing("deleted_files", "session_id", "INTEGER REFERENCES sessions(id)");
 
     // create indexes for faster time-series and session filtering
-    execute_sqlite_query("CREATE INDEX IF NOT EXISTS idx_vitals_ts      ON vitals_log(timestamp);");
-    execute_sqlite_query("CREATE INDEX IF NOT EXISTS idx_vitals_session ON vitals_log(session_id);");
-    execute_sqlite_query("CREATE INDEX IF NOT EXISTS idx_files_ts       ON deleted_files(timestamp);");
-    execute_sqlite_query("CREATE INDEX IF NOT EXISTS idx_alerts_ts      ON alerts(timestamp);");
+    execute_sqlite_query("CREATE INDEX IF NOT EXISTS idx_sessions_end      ON sessions(end_time);");
+    execute_sqlite_query("CREATE INDEX IF NOT EXISTS idx_vitals_ts         ON vitals_log(timestamp);");
+    execute_sqlite_query("CREATE INDEX IF NOT EXISTS idx_vitals_session    ON vitals_log(session_id);");
+    execute_sqlite_query("CREATE INDEX IF NOT EXISTS idx_files_ts          ON deleted_files(timestamp);");
+    execute_sqlite_query("CREATE INDEX IF NOT EXISTS idx_files_session     ON deleted_files(session_id);");
+    execute_sqlite_query("CREATE INDEX IF NOT EXISTS idx_alerts_ts         ON alerts(timestamp);");
+    execute_sqlite_query("CREATE INDEX IF NOT EXISTS idx_alerts_session    ON alerts(session_id);");
+    execute_sqlite_query("CREATE INDEX IF NOT EXISTS idx_alerts_metric_id  ON alerts(metric, id);");
 
     // pre-compile insert statements for high-throughput logging
     bool ok =
@@ -323,14 +360,17 @@ std::vector<SessionInfo> DatabaseManager::find_open_sessions() {
 
     if (active_backend_ == BackendType::MySQL) {
         if (!mysql_handle_) return result;
+        // use index-tail lookup (ORDER BY v.id DESC LIMIT 1) instead of scanning all rows via MAX(v.timestamp)
         const char* q =
             "SELECT s.id, s.start_time, s.pid, IFNULL(s.hostname, ''), "
-            "       IFNULL(MAX(v.timestamp), s.start_time) AS last_seen "
-            "FROM sessions s LEFT JOIN vitals_log v ON v.session_id = s.id "
+            "       IFNULL((SELECT v.timestamp FROM vitals_log v "
+            "               WHERE v.session_id = s.id "
+            "               ORDER BY v.id DESC LIMIT 1), s.start_time) AS last_seen "
+            "FROM sessions s "
             "WHERE s.end_time IS NULL "
-            "GROUP BY s.id, s.start_time, s.pid, s.hostname ORDER BY s.id;";
+            "ORDER BY s.id;";
 
-        if (mysql_query(mysql_handle_, q) == 0) {
+        if (exec_mysql_query(q)) {
             MYSQL_RES* res = mysql_store_result(mysql_handle_);
             if (res) {
                 MYSQL_ROW row;
@@ -349,24 +389,31 @@ std::vector<SessionInfo> DatabaseManager::find_open_sessions() {
         return result;
     }
 
-    // fallback query for sqlite
+    // fallback query for sqlite using index-tail seek on idx_vitals_session
     if (!sqlite_handle_) return result;
     const char* sql =
         "SELECT s.id, s.start_time, s.pid, IFNULL(s.hostname, ''), "
-        "       IFNULL(MAX(v.timestamp), s.start_time) "
-        "FROM sessions s LEFT JOIN vitals_log v ON v.session_id = s.id "
+        "       IFNULL((SELECT v.timestamp FROM vitals_log v "
+        "               WHERE v.session_id = s.id "
+        "               ORDER BY v.id DESC LIMIT 1), s.start_time) "
+        "FROM sessions s "
         "WHERE s.end_time IS NULL "
-        "GROUP BY s.id ORDER BY s.id;";
+        "ORDER BY s.id;";
+
+    auto col_str = [](sqlite3_stmt* st, int idx) -> std::string {
+        const auto* txt = reinterpret_cast<const char*>(sqlite3_column_text(st, idx));
+        return txt ? std::string(txt) : std::string();
+    };
 
     sqlite3_stmt* stmt = nullptr;
     if (sqlite3_prepare_v2(sqlite_handle_, sql, -1, &stmt, nullptr) == SQLITE_OK) {
         while (sqlite3_step(stmt) == SQLITE_ROW) {
             SessionInfo s;
             s.id         = sqlite3_column_int64(stmt, 0);
-            s.start_time = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1));
+            s.start_time = col_str(stmt, 1);
             s.pid        = sqlite3_column_int(stmt, 2);
-            s.hostname   = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 3));
-            s.last_seen  = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 4));
+            s.hostname   = col_str(stmt, 3);
+            s.last_seen  = col_str(stmt, 4);
             result.push_back(std::move(s));
         }
         sqlite3_finalize(stmt);
@@ -382,7 +429,7 @@ bool DatabaseManager::mark_session_crashed(const SessionInfo& s) {
         if (!mysql_handle_) return false;
         std::string q = "UPDATE sessions SET end_time = '" + escape_mysql(s.last_seen) +
                         "', clean_exit = 0 WHERE id = " + std::to_string(s.id) + ";";
-        return mysql_query(mysql_handle_, q.c_str()) == 0;
+        return exec_mysql_query(q.c_str(), static_cast<unsigned long>(q.size()));
     }
 
     if (!sqlite_handle_) return false;
@@ -408,7 +455,7 @@ bool DatabaseManager::begin_session(int pid, const std::string& hostname) {
         if (!mysql_handle_) return false;
         std::string q = "INSERT INTO sessions (start_time, pid, hostname) VALUES ('" +
                         ts + "', " + std::to_string(pid) + ", '" + escape_mysql(hostname) + "');";
-        if (mysql_query(mysql_handle_, q.c_str()) == 0) {
+        if (exec_mysql_query(q.c_str(), static_cast<unsigned long>(q.size()))) {
             session_id_ = mysql_insert_id(mysql_handle_);
             return true;
         }
@@ -442,7 +489,7 @@ bool DatabaseManager::end_session() {
         if (!mysql_handle_) return false;
         std::string q = "UPDATE sessions SET end_time = '" + ts +
                         "', clean_exit = 1 WHERE id = " + std::to_string(session_id_) + ";";
-        return mysql_query(mysql_handle_, q.c_str()) == 0;
+        return exec_mysql_query(q.c_str(), static_cast<unsigned long>(q.size()));
     }
 
     if (!sqlite_handle_) return false;
@@ -466,11 +513,23 @@ bool DatabaseManager::log_vitals(double cpu_usage, double ram_usage, double cpu_
 
     if (active_backend_ == BackendType::MySQL) {
         if (!mysql_handle_) return false;
-        std::string s_id = (session_id_ > 0) ? std::to_string(session_id_) : "NULL";
-        std::string q = "INSERT INTO vitals_log (timestamp, cpu_usage, ram_usage, cpu_temp, fan_speed, session_id) VALUES ('" +
-                        ts + "', " + std::to_string(cpu_usage) + ", " + std::to_string(ram_usage) + ", " +
-                        std::to_string(cpu_temp) + ", " + std::to_string(fan_speed) + ", " + s_id + ");";
-        return mysql_query(mysql_handle_, q.c_str()) == 0;
+        char q[256];
+        int len = 0;
+        if (session_id_ > 0) {
+            len = std::snprintf(
+                q, sizeof(q),
+                "INSERT INTO vitals_log (timestamp, cpu_usage, ram_usage, cpu_temp, fan_speed, session_id) "
+                "VALUES ('%s', %.1f, %.1f, %.1f, %d, %lld);",
+                ts.c_str(), cpu_usage, ram_usage, cpu_temp, fan_speed, session_id_);
+        } else {
+            len = std::snprintf(
+                q, sizeof(q),
+                "INSERT INTO vitals_log (timestamp, cpu_usage, ram_usage, cpu_temp, fan_speed, session_id) "
+                "VALUES ('%s', %.1f, %.1f, %.1f, %d, NULL);",
+                ts.c_str(), cpu_usage, ram_usage, cpu_temp, fan_speed);
+        }
+        if (len <= 0 || static_cast<size_t>(len) >= sizeof(q)) return false;
+        return exec_mysql_query(q, static_cast<unsigned long>(len));
     }
 
     if (!sqlite_handle_ || !stmt_vitals_) return false;
@@ -501,7 +560,7 @@ bool DatabaseManager::log_file_event(std::string_view file_name, std::string_vie
         std::string q = "INSERT INTO deleted_files (timestamp, file_name, event_type, is_dir, new_name, session_id) VALUES ('" +
                         ts + "', '" + escape_mysql(file_name) + "', '" + escape_mysql(event_type) + "', " +
                         (is_dir ? "1" : "0") + ", " + new_name_sql + ", " + s_id + ");";
-        return mysql_query(mysql_handle_, q.c_str()) == 0;
+        return exec_mysql_query(q.c_str(), static_cast<unsigned long>(q.size()));
     }
 
     if (!sqlite_handle_ || !stmt_file_) return false;
@@ -518,6 +577,88 @@ bool DatabaseManager::log_file_event(std::string_view file_name, std::string_vie
     else                sqlite3_bind_null (stmt_file_, 6);
 
     return (sqlite3_step(stmt_file_) == SQLITE_DONE);
+}
+
+// batch insert multiple file events in a single transaction or multi-row insert to prevent fsync stalls on bursts
+bool DatabaseManager::log_file_events_batch(const std::vector<FileEvent>& events) {
+    if (events.empty()) return true;
+    if (events.size() == 1) {
+        const auto& ev = events[0];
+        return log_file_event(ev.file_name, ev.event_type, ev.is_dir, ev.new_name);
+    }
+
+    std::lock_guard<std::mutex> lock(db_mutex_);
+    const std::string ts = current_timestamp();
+
+    if (active_backend_ == BackendType::MySQL) {
+        if (!mysql_handle_) return false;
+        const std::string s_id = (session_id_ > 0) ? std::to_string(session_id_) : "NULL";
+        constexpr size_t CHUNK_SIZE = 200;
+        bool all_ok = true;
+
+        for (size_t start = 0; start < events.size(); start += CHUNK_SIZE) {
+            size_t end = std::min(events.size(), start + CHUNK_SIZE);
+            std::string q;
+            q.reserve((end - start) * 128 + 128);
+            q += "INSERT INTO deleted_files (timestamp, file_name, event_type, is_dir, new_name, session_id) VALUES ";
+
+            for (size_t i = start; i < end; ++i) {
+                if (i > start) q += ',';
+                const auto& ev = events[i];
+                q += "('";
+                q += ts;
+                q += "','";
+                q += escape_mysql(ev.file_name);
+                q += "','";
+                q += escape_mysql(ev.event_type);
+                q += "',";
+                q += (ev.is_dir ? "1," : "0,");
+                if (ev.new_name.empty()) {
+                    q += "NULL,";
+                } else {
+                    q += '\'';
+                    q += escape_mysql(ev.new_name);
+                    q += "',";
+                }
+                q += s_id;
+                q += ')';
+            }
+            q += ';';
+            if (!exec_mysql_query(q.c_str(), static_cast<unsigned long>(q.size()))) {
+                all_ok = false;
+            }
+        }
+        return all_ok;
+    }
+
+    if (!sqlite_handle_ || !stmt_file_) return false;
+    if (!execute_sqlite_query("BEGIN IMMEDIATE;")) return false;
+
+    bool all_ok = true;
+    for (const auto& ev : events) {
+        sqlite3_reset(stmt_file_);
+        sqlite3_clear_bindings(stmt_file_);
+
+        sqlite3_bind_text(stmt_file_, 1, ts.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt_file_, 2, ev.file_name.data(), static_cast<int>(ev.file_name.size()), SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt_file_, 3, ev.event_type.data(), static_cast<int>(ev.event_type.size()), SQLITE_TRANSIENT);
+        sqlite3_bind_int (stmt_file_, 4, ev.is_dir ? 1 : 0);
+        if (ev.new_name.empty()) sqlite3_bind_null(stmt_file_, 5);
+        else sqlite3_bind_text(stmt_file_, 5, ev.new_name.data(), static_cast<int>(ev.new_name.size()), SQLITE_TRANSIENT);
+        if (session_id_ > 0) sqlite3_bind_int64(stmt_file_, 6, session_id_);
+        else                sqlite3_bind_null (stmt_file_, 6);
+
+        if (sqlite3_step(stmt_file_) != SQLITE_DONE) {
+            all_ok = false;
+            break;
+        }
+    }
+
+    if (all_ok) {
+        return execute_sqlite_query("COMMIT;");
+    }
+    execute_sqlite_query("ROLLBACK;");
+    return false;
 }
 
 // backward compatible alias for file deletion
@@ -537,7 +678,7 @@ bool DatabaseManager::log_alert(std::string_view metric, double value, double th
         std::string q = "INSERT INTO alerts (timestamp, metric, value, threshold, state, session_id) VALUES ('" +
                         ts + "', '" + escape_mysql(metric) + "', " + std::to_string(value) + ", " +
                         std::to_string(threshold) + ", '" + escape_mysql(state) + "', " + s_id + ");";
-        return mysql_query(mysql_handle_, q.c_str()) == 0;
+        return exec_mysql_query(q.c_str(), static_cast<unsigned long>(q.size()));
     }
 
     if (!sqlite_handle_ || !stmt_alert_) return false;
@@ -562,9 +703,10 @@ int DatabaseManager::purge_old_vitals(int days) {
 
     if (active_backend_ == BackendType::MySQL) {
         if (!mysql_handle_) return -1;
-        std::string q = "DELETE FROM vitals_log WHERE timestamp < DATE_SUB(NOW(), INTERVAL " +
-                        std::to_string(days) + " DAY);";
-        if (mysql_query(mysql_handle_, q.c_str()) == 0) {
+        // format cutoff as string matching VARCHAR(25) timestamp so idx_vitals_ts uses a B-tree range scan
+        std::string q = "DELETE FROM vitals_log WHERE timestamp < DATE_FORMAT(DATE_SUB(NOW(), INTERVAL " +
+                        std::to_string(days) + " DAY), '%Y-%m-%d %H:%i:%s');";
+        if (exec_mysql_query(q.c_str(), static_cast<unsigned long>(q.size()))) {
             return static_cast<int>(mysql_affected_rows(mysql_handle_));
         }
         return -1;

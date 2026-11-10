@@ -7,7 +7,8 @@ CREATE TABLE IF NOT EXISTS sessions (
     end_time VARCHAR(25) NULL,
     pid INT NOT NULL,
     hostname VARCHAR(255) NULL,
-    clean_exit TINYINT NULL -- clean_exit: 1 = clean exit on SIGINT or SIGTERM, 0 = crashed, NULL = currently active
+    clean_exit TINYINT NULL, -- clean_exit: 1 = clean exit on SIGINT or SIGTERM, 0 = crashed, NULL = currently active
+    INDEX idx_sessions_end (end_time)
 ) ENGINE=InnoDB;
 
 -- stores time-series hardware readings sampled every second with secondary indexes
@@ -46,5 +47,6 @@ CREATE TABLE IF NOT EXISTS alerts (
     state VARCHAR(32) NOT NULL,
     session_id BIGINT NULL,
     INDEX idx_alerts_ts (timestamp),
-    INDEX idx_alerts_session (session_id)
+    INDEX idx_alerts_session (session_id),
+    INDEX idx_alerts_metric_id (metric, id)
 ) ENGINE=InnoDB;

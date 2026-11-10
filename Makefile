@@ -4,7 +4,7 @@ CXX          := g++
 MYSQL_CFLAGS := $(shell mysql_config --cflags 2>/dev/null || mariadb_config --cflags 2>/dev/null || echo "-I/usr/include/mysql")
 MYSQL_LIBS   := $(shell mysql_config --libs 2>/dev/null || mariadb_config --libs 2>/dev/null || echo "-lmariadb")
 
-CXXFLAGS     := -std=c++23 -Wall -Wextra -Wpedantic -O2 -g -MMD -MP $(MYSQL_CFLAGS)
+CXXFLAGS     := -std=c++23 -Wall -Wextra -Wpedantic -O2 -g -pthread -MMD -MP $(MYSQL_CFLAGS)
 LDFLAGS      := $(MYSQL_LIBS) -lsqlite3 -pthread
 
 TARGET       := system_blackbox
