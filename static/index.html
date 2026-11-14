@@ -1,144 +1,247 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <!-- responsive viewport and charset setup -->
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>System Blackbox — OS Telemetry & DBMS Monitor</title>
+  <title>System Blackbox — OS Telemetry &amp; DBMS Monitor</title>
 
-  <!-- modern font imports (non-render-blocking so offline or slow networks render instantly) -->
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@500;700;800&family=Outfit:wght@400;600;700&display=swap" rel="stylesheet" media="print" onload="this.media='all'">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700;800&family=Outfit:wght@500;600;700&display=swap" rel="stylesheet" media="print" onload="this.media='all'">
   <noscript>
-    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@500;700;800&family=Outfit:wght@400;600;700&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700;800&family=Outfit:wght@500;600;700&display=swap" rel="stylesheet">
   </noscript>
 
-  <!-- link to external stylesheet for layout and colors -->
-  <link rel="stylesheet" href="style.css">
+  <!-- cache-busted stylesheet so browser never pairs new HTML with old CSS -->
+  <link rel="stylesheet" href="style.css?v=20261114d">
 </head>
 <body>
-  <!-- main centered wrapper for dashboard -->
   <div class="container">
-    
-    <!-- header: shows title, subtitle, live status indicator, and last updated time -->
-    <div class="header">
+
+    <!-- Top Header Bar -->
+    <header class="header">
       <div class="title-group">
-        <!-- pulsing dot showing daemon heartbeat -->
-        <span class="pulse" id="livePulse"></span>
         <div>
-          <h1>System Blackbox</h1>
-          <div class="subtitle">OS Telemetry & Forensic Kernel Auditor (MySQL & SQLite)</div>
+          <div class="title-row">
+            <h1>System Blackbox</h1>
+          </div>
+          <div class="subtitle">Linux Kernel Telemetry &amp; Relational Forensic Auditor</div>
         </div>
       </div>
-      
-      <!-- metadata in header: daemon status badge, session info, and timestamp -->
+
       <div class="header-meta">
-        <!-- status badge indicates whether backend is recording -->
+        <div class="meta-chip" id="dbBackendBadge" title="Active Database Backend">
+          <span class="meta-dot db-dot"></span>
+          <span id="dbBackendLabel">MySQL</span>
+        </div>
+
+        <div class="meta-chip" id="daemonMetaChip" title="Active Daemon Process &amp; Host">
+          <span id="pipePid">PID —</span>
+          <span class="meta-sep">·</span>
+          <span id="pipeHost">localhost</span>
+        </div>
+
         <div class="status-badge" id="engineBadge">
           <span class="badge-dot" id="badgeDot"></span>
-          <span id="engineStatus">Connecting to DB...</span>
+          <span id="engineStatus">Connecting...</span>
         </div>
-        <!-- shows timestamp of latest telemetry sample -->
+
         <span class="timestamp" id="lastUpdated">--:--:--</span>
+      </div>
+    </header>
+
+    <!-- Conditional Forensic Notice Banner (only visible when an alert triggers or a crash is recorded) -->
+    <div class="forensic-banner" id="forensicBanner" style="display: none;" role="alert">
+      <div class="banner-content">
+        <span class="banner-badge" id="bannerTitle">ALERT</span>
+        <span class="banner-msg" id="bannerDetail">Active threshold breach or unexpected session crash detected.</span>
+      </div>
+      <div class="banner-actions">
+        <button type="button" class="banner-link" id="bannerAlertsBtn" onclick="jumpToForensicTab('alerts')" style="display: none;">View Alerts →</button>
+        <button type="button" class="banner-link" id="bannerSessionsBtn" onclick="jumpToForensicTab('sessions')" style="display: none;">View Crash Log →</button>
       </div>
     </div>
 
-    <!-- grid displaying hardware vitals with sparkline mini-charts -->
+    <!-- 4-Column Hardware Vitals KPI Row -->
     <div class="grid">
-      
-      <!-- card 1: cpu usage from /proc/stat -->
-      <div class="card">
+
+      <!-- Card 1: CPU Usage -->
+      <div class="card kpi-card kpi-cpu">
         <div class="card-header">
-          <span class="label">CPU Usage (/proc/stat)</span>
+          <span class="label">CPU Usage</span>
+          <span class="source-pill">/proc/stat</span>
         </div>
-        <div class="value" id="cpuVal">--%</div>
-        <div class="bar-track">
+        <div class="value-row">
+          <div class="value" id="cpuVal">--%</div>
+          <span class="kpi-delta flat" id="cpuDelta">0.0%</span>
+        </div>
+        <div class="bar-track" title="Alert threshold: 90%">
           <div class="bar-fill bar-cpu" id="cpuBar" style="width: 0%"></div>
+          <span class="bar-limit" style="left: 90%"></span>
         </div>
-        <canvas class="sparkline" id="cpuSpark" width="320" height="36"></canvas>
+        <canvas class="sparkline" id="cpuSpark" width="320" height="40"></canvas>
+        <div class="card-footer">
+          <span class="kpi-stats" id="cpuStats">MIN — · AVG — · PEAK —</span>
+          <span class="limit-label">Lim 90%</span>
+        </div>
       </div>
 
-      <!-- card 2: ram usage from /proc/meminfo -->
-      <div class="card">
+      <!-- Card 2: RAM Usage -->
+      <div class="card kpi-card kpi-ram">
         <div class="card-header">
-          <span class="label">RAM Usage (/proc/meminfo)</span>
+          <span class="label">RAM Usage</span>
+          <span class="source-pill">/proc/meminfo</span>
         </div>
-        <div class="value" id="ramVal">--%</div>
-        <div class="bar-track">
+        <div class="value-row">
+          <div class="value" id="ramVal">--%</div>
+          <span class="kpi-delta flat" id="ramDelta">0.0%</span>
+        </div>
+        <div class="bar-track" title="Alert threshold: 90%">
           <div class="bar-fill bar-ram" id="ramBar" style="width: 0%"></div>
+          <span class="bar-limit" style="left: 90%"></span>
         </div>
-        <canvas class="sparkline" id="ramSpark" width="320" height="36"></canvas>
+        <canvas class="sparkline" id="ramSpark" width="320" height="40"></canvas>
+        <div class="card-footer">
+          <span class="kpi-stats" id="ramStats">MIN — · AVG — · PEAK —</span>
+          <span class="limit-label">Lim 90%</span>
+        </div>
       </div>
 
-      <!-- card 3: cpu temperature from hwmon or thermal zones -->
-      <div class="card">
+      <!-- Card 3: CPU Temp -->
+      <div class="card kpi-card kpi-temp">
         <div class="card-header">
-          <span class="label">CPU Temp (coretemp)</span>
+          <span class="label">CPU Temp</span>
+          <span class="source-pill">coretemp</span>
         </div>
-        <div class="value" id="tempVal">-- °C</div>
-        <div class="bar-track">
+        <div class="value-row">
+          <div class="value" id="tempVal">-- °C</div>
+          <span class="kpi-delta flat" id="tempDelta">0.0°C</span>
+        </div>
+        <div class="bar-track" title="Alert threshold: 85°C">
           <div class="bar-fill bar-temp" id="tempBar" style="width: 0%"></div>
+          <span class="bar-limit" style="left: 85%"></span>
         </div>
-        <canvas class="sparkline" id="tempSpark" width="320" height="36"></canvas>
+        <canvas class="sparkline" id="tempSpark" width="320" height="40"></canvas>
+        <div class="card-footer">
+          <span class="kpi-stats" id="tempStats">MIN — · AVG — · PEAK —</span>
+          <span class="limit-label">Lim 85°C</span>
+        </div>
       </div>
 
-      <!-- card 4: fan speed from hwmon sensors -->
-      <div class="card">
+      <!-- Card 4: Fan Speed -->
+      <div class="card kpi-card kpi-fan">
         <div class="card-header">
-          <span class="label">Fan Speed (hwmon RPM)</span>
+          <span class="label">Fan Speed</span>
+          <span class="source-pill">hwmon RPM</span>
         </div>
-        <div class="value" id="fanVal">-- RPM</div>
+        <div class="value-row">
+          <div class="value" id="fanVal">-- RPM</div>
+          <span class="kpi-delta flat" id="fanDelta">0 RPM</span>
+        </div>
         <div class="bar-track">
           <div class="bar-fill bar-fan" id="fanBar" style="width: 0%"></div>
         </div>
-        <canvas class="sparkline" id="fanSpark" width="320" height="36"></canvas>
+        <canvas class="sparkline" id="fanSpark" width="320" height="40"></canvas>
+        <div class="card-footer">
+          <span class="kpi-stats" id="fanStats">MIN — · AVG — · PEAK —</span>
+          <span class="limit-label">Max 5.5k</span>
+        </div>
       </div>
 
     </div>
 
-    <!-- forensic logs and diagnostics card -->
+    <!-- Multi-Metric Historical Telemetry Chart -->
+    <div class="card chart-card">
+      <div class="card-header chart-top">
+        <div class="chart-title-group">
+          <span class="label">Telemetry Timeline</span>
+          <span class="source-pill">vitals_log</span>
+          <span class="badge-mini" id="historyPointCount">0 pts</span>
+        </div>
+
+        <div class="chart-toolbar">
+          <div class="pill-group" id="seriesSelector">
+            <button type="button" class="series-pill active" data-series="all" onclick="setChartSeries('all')">All</button>
+            <button type="button" class="series-pill" data-series="cpu" onclick="setChartSeries('cpu')"><span class="dot dot-cpu"></span>CPU</button>
+            <button type="button" class="series-pill" data-series="ram" onclick="setChartSeries('ram')"><span class="dot dot-ram"></span>RAM</button>
+            <button type="button" class="series-pill" data-series="temp" onclick="setChartSeries('temp')"><span class="dot dot-temp"></span>Temp</button>
+            <button type="button" class="series-pill" data-series="fan" onclick="setChartSeries('fan')"><span class="dot dot-fan"></span>Fan</button>
+          </div>
+
+          <div class="pill-group" id="windowSelector">
+            <button type="button" class="seg-btn" data-minutes="5" onclick="setHistoryWindow(5)">5m</button>
+            <button type="button" class="seg-btn active" data-minutes="15" onclick="setHistoryWindow(15)">15m</button>
+            <button type="button" class="seg-btn" data-minutes="30" onclick="setHistoryWindow(30)">30m</button>
+            <button type="button" class="seg-btn" data-minutes="60" onclick="setHistoryWindow(60)">1h</button>
+            <button type="button" class="seg-btn" data-minutes="120" onclick="setHistoryWindow(120)">2h</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="main-chart-wrap">
+        <canvas id="mainHistoryChart"></canvas>
+        <div class="chart-empty" id="mainChartEmpty">Collecting telemetry samples in vitals_log...</div>
+        <div class="chart-tooltip" id="chartTooltip" style="display: none;"></div>
+      </div>
+    </div>
+
+    <!-- Forensic DBMS Audit & Diagnostics Card -->
     <div class="card log-card">
-      <div class="card-header">
+      <div class="card-header log-top">
         <div class="tab-buttons">
-          <button class="tab-btn active" id="tabFilesBtn" onclick="switchTab('files')">
+          <button type="button" class="tab-btn active" id="tabFilesBtn" onclick="switchTab('files')">
             Inotify Audits <span class="badge-mini" id="deletionCount">0</span>
           </button>
-          <button class="tab-btn" id="tabAlertsBtn" onclick="switchTab('alerts')">
+          <button type="button" class="tab-btn" id="tabAlertsBtn" onclick="switchTab('alerts')">
             Alerts <span class="badge-mini" id="alertCount">0</span>
           </button>
-          <button class="tab-btn" id="tabSessionsBtn" onclick="switchTab('sessions')">
-            Crash & Session History <span class="badge-mini" id="sessionCount">0</span>
+          <button type="button" class="tab-btn" id="tabSessionsBtn" onclick="switchTab('sessions')">
+            Crash &amp; Session History <span class="badge-mini" id="sessionCount">0</span>
+          </button>
+        </div>
+
+        <div class="forensic-tools">
+          <div class="pill-group" id="fileFilterGroup">
+            <button type="button" class="filter-pill active" data-ev="ALL" onclick="setFileEventFilter('ALL')">All</button>
+            <button type="button" class="filter-pill" data-ev="DELETED" onclick="setFileEventFilter('DELETED')">Deleted</button>
+            <button type="button" class="filter-pill" data-ev="RENAMED" onclick="setFileEventFilter('RENAMED')">Renamed</button>
+            <button type="button" class="filter-pill" data-ev="MOVED_OUT" onclick="setFileEventFilter('MOVED_OUT')">Moved</button>
+          </div>
+
+          <input type="search" class="search-input" id="auditSearchInput" placeholder="Search logs..." autocomplete="off">
+
+          <button type="button" class="action-btn" id="exportCsvBtn" onclick="exportActiveTabCsv()" title="Export active table to CSV">
+            Export CSV
           </button>
         </div>
       </div>
-      
-      <!-- panel 1: file events table -->
+
+      <!-- Panel 1: File Events Table -->
       <div class="table-container tab-content" id="panelFiles">
         <table class="audit-table">
           <thead>
             <tr>
-              <th style="width: 50px;">ID</th>
-              <th style="width: 170px;">Timestamp</th>
-              <th style="width: 110px;">Event</th>
+              <th style="width: 64px;">ID</th>
+              <th style="width: 175px;">Timestamp</th>
+              <th style="width: 125px;">Event</th>
               <th>Target Path / Rename</th>
             </tr>
           </thead>
           <tbody id="deletionsTableBody">
             <tr>
-              <td colspan="4" class="empty-hint">Watching ./test_watch/ for file deletion & move events...</td>
+              <td colspan="4" class="empty-hint">Watching ./test_watch/ for file deletion &amp; move events...</td>
             </tr>
           </tbody>
         </table>
       </div>
 
-      <!-- panel 2: alerts table -->
+      <!-- Panel 2: Alerts Table -->
       <div class="table-container tab-content" id="panelAlerts" style="display: none;">
         <table class="audit-table">
           <thead>
             <tr>
-              <th style="width: 50px;">ID</th>
-              <th style="width: 170px;">Timestamp</th>
+              <th style="width: 64px;">ID</th>
+              <th style="width: 175px;">Timestamp</th>
               <th>Metric</th>
               <th>Value</th>
               <th>Threshold</th>
@@ -153,14 +256,15 @@
         </table>
       </div>
 
-      <!-- panel 3: sessions and crash detection table -->
+      <!-- Panel 3: Sessions and Crash Detection Table -->
       <div class="table-container tab-content" id="panelSessions" style="display: none;">
         <table class="audit-table">
           <thead>
             <tr>
-              <th style="width: 60px;">Session</th>
+              <th style="width: 72px;">Session</th>
               <th>Start Time</th>
               <th>End Time</th>
+              <th>Duration</th>
               <th>PID</th>
               <th>Host</th>
               <th>Termination Status</th>
@@ -168,17 +272,16 @@
           </thead>
           <tbody id="sessionsTableBody">
             <tr>
-              <td colspan="6" class="empty-hint">No session history found.</td>
+              <td colspan="7" class="empty-hint">No session history found.</td>
             </tr>
           </tbody>
         </table>
       </div>
-
     </div>
 
   </div>
 
-  <!-- client-side script to poll api endpoints and update dashboard -->
-  <script src="app.js"></script>
+  <!-- cache-busted script so browser never runs stale JS -->
+  <script src="app.js?v=20261114d"></script>
 </body>
 </html>
